@@ -43,6 +43,8 @@ struct Command {
       try runCommandCatalog(args)
     case "action":
       try runActions(args)
+    case "work":
+      try runWork(args)
     case "diagnostics", "doctor":
       try runDiagnostics(args)
     default:
@@ -164,6 +166,55 @@ struct Command {
     }
   }
 
+  private func runWork(_ arguments: [String]) throws {
+    var args = arguments
+    let json = consumeFlag("--json", from: &args)
+    let dryRun = consumeFlag("--dry-run", from: &args)
+
+    guard let subcommand = args.first else {
+      throw CLIError(message: "Missing work subcommand.", code: "missing_work_subcommand", exitCode: 2, json: json)
+    }
+    args.removeFirst()
+
+    switch subcommand {
+    case "dev":
+      do {
+        let targets = try WorkDevPlan.targets(from: args)
+        let plan = try WorkDevPlan(
+          targets: targets,
+          pathResolver: RepoPathResolver(environment: environment),
+          inTmux: environment["TMUX"]?.isEmpty == false
+        )
+
+        if json || dryRun {
+          writeJSON(plan)
+          return
+        }
+
+        try WorkDevExecutor(environment: environment).open(plan)
+      } catch let error as WorkDevPlanError {
+        let message = json ? error.localizedDescription : "\(error.localizedDescription)\n\n\(workUsage())"
+        throw CLIError(
+          message: message,
+          code: error.code,
+          exitCode: 1,
+          json: json,
+          prefixed: false
+        )
+      } catch let error as WorkDevExecutionError {
+        throw CLIError(
+          message: error.localizedDescription,
+          code: error.code,
+          exitCode: 1,
+          json: json,
+          prefixed: false
+        )
+      }
+    default:
+      throw CLIError(message: "Unknown work subcommand: \(subcommand)", code: "unknown_work_subcommand", exitCode: 2, json: json)
+    }
+  }
+
   private func runDiagnostics(_ arguments: [String]) throws {
     var args = arguments
     let json = consumeFlag("--json", from: &args)
@@ -223,12 +274,15 @@ struct CLIError: Error {
   var code: String
   var exitCode: Int32
   var json: Bool
+  var prefixed: Bool = true
 
   func write() {
     if json {
       writeJSON(JSONError(error: message, code: code))
-    } else {
+    } else if prefixed {
       writeHumanError(message)
+    } else {
+      FileHandle.standardError.write(Data("\(message)\n".utf8))
     }
   }
 }
@@ -264,7 +318,35 @@ func printHelp() {
       maestro repo open <repo> [--json] [--dry-run]
       maestro command list [--repo <repo>] [--json]
       maestro action list [--json]
+      maestro work dev <target...> [--json] [--dry-run]
       maestro diagnostics [--json]
     """
   )
+}
+
+func workUsage() -> String {
+  """
+  Usage:
+    work <repo>
+    work dev <target...>
+
+  Repos:
+    node      node
+    account   node_account
+    admin     node_admin
+    plan      node_plan
+    board     node_board
+    website   node_website
+    email     node_email
+    tools     maestro
+    resume    resume
+    ux        node_ux
+
+  Dev targets:
+    all       website + account + admin
+    website   node_website
+    account   node_account
+    admin     node_admin
+    shell     shell pane in node root
+  """
 }

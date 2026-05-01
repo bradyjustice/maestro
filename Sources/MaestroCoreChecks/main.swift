@@ -8,6 +8,8 @@ struct MaestroCoreChecks {
     try repoPathResolverPreservesCurrentWorkOverrides()
     try stateDirectoryResolutionMatchesCompatibilityRules()
     try repoOpenPlanMatchesCompatibilityWindows()
+    try workDevTargetSelectionMatchesCompatibility()
+    try workDevPlanMatchesCompatibilityCommands()
     try riskPolicyBlocksUnknownRiskyScripts()
     try discoveredRiskyScriptsStayBlockedUntilConfigured()
     try catalogValidationReportsFailures()
@@ -96,6 +98,90 @@ struct MaestroCoreChecks {
       ["select-window", "-t", "tools:Coding"]
     ], "repo-open tmux plan")
     try expectEqual(plan.focusCommand.arguments, ["switch-client", "-t", "tools"], "tmux focus in existing session")
+  }
+
+  private static func workDevTargetSelectionMatchesCompatibility() throws {
+    try expectEqual(
+      try WorkDevPlan.targets(from: ["website", "account"]),
+      [.website, .account],
+      "explicit work dev target order"
+    )
+    try expectEqual(
+      try WorkDevPlan.targets(from: ["all", "shell"]),
+      [.website, .account, .admin, .shell],
+      "all target expansion with shell"
+    )
+    try expectEqual(
+      try WorkDevPlan.targets(from: ["admin", "website"]),
+      [.website, .admin],
+      "compatibility target ordering"
+    )
+
+    do {
+      _ = try WorkDevPlan.targets(from: [])
+      throw CheckFailure("expected missing work dev targets to fail")
+    } catch let error as WorkDevPlanError {
+      try expectEqual(error, .missingTargets, "missing dev targets error")
+    }
+
+    do {
+      _ = try WorkDevPlan.targets(from: ["shell"])
+      throw CheckFailure("expected shell-only work dev targets to fail")
+    } catch let error as WorkDevPlanError {
+      try expectEqual(error, .invalidTargets, "shell-only dev targets error")
+    }
+
+    do {
+      _ = try WorkDevPlan.targets(from: ["nope"])
+      throw CheckFailure("expected invalid work dev targets to fail")
+    } catch let error as WorkDevPlanError {
+      try expectEqual(error, .invalidTargets, "invalid dev targets error")
+    }
+  }
+
+  private static func workDevPlanMatchesCompatibilityCommands() throws {
+    let plan = try WorkDevPlan(
+      targets: [.website, .account, .admin, .shell],
+      pathResolver: RepoPathResolver(environment: ["WORK_NODE_ROOT": "/tmp/node"]),
+      inTmux: true
+    )
+
+    try expectEqual(plan.session, "node-dev", "work dev session")
+    try expectEqual(plan.window, "dev", "work dev window")
+    try expectEqual(plan.iTermTitle, "work:node-dev", "work dev iTerm title")
+    try expectEqual(plan.targets.map(\.resolvedPath), [
+      "/tmp/node/node_website",
+      "/tmp/node/node_account",
+      "/tmp/node/node_admin",
+      "/tmp/node"
+    ], "work dev target paths")
+    try expectEqual(plan.targets.map(\.paneIndex), [0, 1, 2, 3], "work dev pane indexes")
+    try expectEqual(plan.targets.map(\.runsDevServer), [true, true, true, false], "work dev server flags")
+    try expectEqual(plan.hasSessionCommand.arguments, ["has-session", "-t", "node-dev"], "work dev has-session command")
+    try expectEqual(plan.killExistingSessionCommand.arguments, ["kill-session", "-t", "node-dev"], "work dev kill-session command")
+    try expectEqual(
+      plan.createSessionCommand.arguments,
+      ["new-session", "-d", "-s", "node-dev", "-n", "dev", "-c", "/tmp/node/node_website"],
+      "work dev new-session command"
+    )
+    try expectEqual(
+      plan.remainOnExitCommand.arguments,
+      ["set-window-option", "-t", "node-dev:dev", "remain-on-exit", "on"],
+      "work dev remain-on-exit command"
+    )
+    try expectEqual(plan.paneCommands.map(\.arguments), [
+      ["send-keys", "-t", "node-dev:dev.0", "npm run dev", "C-m"],
+      ["split-window", "-t", "node-dev:dev", "-c", "/tmp/node/node_account"],
+      ["send-keys", "-t", "node-dev:dev.1", "npm run dev", "C-m"],
+      ["split-window", "-t", "node-dev:dev", "-c", "/tmp/node/node_admin"],
+      ["send-keys", "-t", "node-dev:dev.2", "npm run dev", "C-m"],
+      ["split-window", "-t", "node-dev:dev", "-c", "/tmp/node"]
+    ], "work dev pane commands")
+    try expectEqual(plan.layoutCommands.map(\.arguments), [
+      ["select-layout", "-t", "node-dev:dev", "tiled"],
+      ["select-pane", "-t", "node-dev:dev.0"]
+    ], "work dev layout commands")
+    try expectEqual(plan.focusCommand.arguments, ["switch-client", "-t", "node-dev"], "work dev tmux focus")
   }
 
   private static func riskPolicyBlocksUnknownRiskyScripts() throws {

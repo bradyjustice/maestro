@@ -51,53 +51,6 @@ repo_dir() {
   esac
 }
 
-dev_target_dir() {
-  case "${1:-}" in
-    website) printf '%s\n' "$NODE_ROOT/node_website" ;;
-    account) printf '%s\n' "$NODE_ROOT/node_account" ;;
-    admin) printf '%s\n' "$NODE_ROOT/node_admin" ;;
-    shell) printf '%s\n' "$NODE_ROOT" ;;
-    *) return 1 ;;
-  esac
-}
-
-dev_targets_from_args() {
-  local arg
-  local want_website=0
-  local want_account=0
-  local want_admin=0
-  local want_shell=0
-
-  [[ $# -gt 0 ]] || return 1
-
-  for arg in "$@"; do
-    case "$arg" in
-      all)
-        want_website=1
-        want_account=1
-        want_admin=1
-        ;;
-      website) want_website=1 ;;
-      account) want_account=1 ;;
-      admin) want_admin=1 ;;
-      shell) want_shell=1 ;;
-      *) return 1 ;;
-    esac
-  done
-
-  if (( ! want_website && ! want_account && ! want_admin )); then
-    return 1
-  fi
-
-  DEV_TARGETS=()
-  (( want_website )) && DEV_TARGETS+=(website)
-  (( want_account )) && DEV_TARGETS+=(account)
-  (( want_admin )) && DEV_TARGETS+=(admin)
-  (( want_shell )) && DEV_TARGETS+=(shell)
-
-  return 0
-}
-
 ensure_dir_exists() {
   local label="$1"
   local dir="$2"
@@ -106,64 +59,6 @@ ensure_dir_exists() {
     printf '%s directory does not exist: %s\n' "$label" "$dir" >&2
     exit 1
   fi
-}
-
-set_iterm_window_title() {
-  local title="$1"
-
-  if [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]]; then
-    printf '\033]0;%s\007' "$title"
-  fi
-}
-
-attach_or_switch() {
-  local session="$1"
-
-  if [[ -n "${TMUX:-}" ]]; then
-    tmux switch-client -t "$session"
-  else
-    tmux attach-session -t "$session"
-  fi
-}
-
-run_dev_mode() {
-  local session="node-dev"
-  set_iterm_window_title "work:node-dev"
-  local window="dev"
-  local first_target="${DEV_TARGETS[0]}"
-  local first_dir
-  local target
-  local dir
-  local pane_index=0
-
-  first_dir="$(dev_target_dir "$first_target")"
-  ensure_dir_exists "Dev target" "$first_dir"
-
-  if tmux has-session -t "$session" 2>/dev/null; then
-    tmux kill-session -t "$session"
-  fi
-
-  tmux new-session -d -s "$session" -n "$window" -c "$first_dir"
-  tmux set-window-option -t "$session:$window" remain-on-exit on
-
-  for target in "${DEV_TARGETS[@]}"; do
-    dir="$(dev_target_dir "$target")"
-    ensure_dir_exists "Dev target" "$dir"
-
-    if (( pane_index > 0 )); then
-      tmux split-window -t "$session:$window" -c "$dir"
-    fi
-
-    if [[ "$target" != "shell" ]]; then
-      tmux send-keys -t "$session:$window.$pane_index" "npm run dev" C-m
-    fi
-
-    ((pane_index += 1))
-  done
-
-  tmux select-layout -t "$session:$window" tiled
-  tmux select-pane -t "$session:$window.0"
-  attach_or_switch "$session"
 }
 
 run_repo_mode() {
@@ -198,20 +93,7 @@ main() {
       exit 0
     fi
 
-    if [[ $# -eq 0 ]]; then
-      printf 'Missing dev targets.\n\n' >&2
-      usage >&2
-      exit 1
-    fi
-
-    if ! dev_targets_from_args "$@"; then
-      printf 'Invalid dev targets.\n\n' >&2
-      usage >&2
-      exit 1
-    fi
-
-    run_dev_mode
-    exit 0
+    exec "$maestro_bin" work dev "$@"
   fi
 
   if [[ $# -ne 1 ]]; then

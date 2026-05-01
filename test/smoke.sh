@@ -51,6 +51,7 @@ fi
 "$repo_root/bin/maestro" repo open account --dry-run --json > "$tmp/maestro-repo-open.json"
 "$repo_root/bin/maestro" command list --json > "$tmp/maestro-commands.json"
 "$repo_root/bin/maestro" action list --json > "$tmp/maestro-actions.json"
+"$repo_root/bin/maestro" work dev all shell --dry-run --json > "$tmp/maestro-work-dev.json"
 "$repo_root/bin/maestro" diagnostics --json > "$tmp/maestro-diagnostics.json"
 
 if ! grep -q '"key" : "account"' "$tmp/maestro-repos.json"; then
@@ -74,6 +75,12 @@ fi
 if ! grep -q '"id" : "repo.account.open"' "$tmp/maestro-actions.json"; then
   printf 'Expected maestro action list JSON to include repo.account.open; saw:\n' >&2
   cat "$tmp/maestro-actions.json" >&2
+  exit 1
+fi
+
+if ! grep -q '"session" : "node-dev"' "$tmp/maestro-work-dev.json" || ! grep -q '"target" : "shell"' "$tmp/maestro-work-dev.json"; then
+  printf 'Expected maestro work dev dry-run JSON to include node-dev and shell; saw:\n' >&2
+  cat "$tmp/maestro-work-dev.json" >&2
   exit 1
 fi
 
@@ -299,7 +306,7 @@ if ! grep -q '^Unknown repo: nope$' "$tmp/work-repo-unknown.err"; then
 fi
 
 : > "$dev_tmux_log"
-tmux_log="$dev_tmux_log" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" dev website >/dev/null
+tmux_log="$dev_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" dev website >/dev/null
 
 if ! grep -Fqx "new-session -d -s node-dev -n dev -c $work_root/node_website" "$dev_tmux_log"; then
   printf 'Expected work dev website to create a node-dev session in node_website; saw:\n' >&2
@@ -338,7 +345,7 @@ if ! grep -Fqx "switch-client -t node-dev" "$dev_tmux_log"; then
 fi
 
 : > "$dev_tmux_log"
-tmux_log="$dev_tmux_log" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" dev website account >/dev/null
+tmux_log="$dev_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" dev website account >/dev/null
 
 if ! grep -Fqx "split-window -t node-dev:dev -c $work_root/node_account" "$dev_tmux_log"; then
   printf 'Expected work dev website account to split a pane for node_account; saw:\n' >&2
@@ -359,7 +366,7 @@ if [[ "$(grep -c '^split-window -t node-dev:dev -c ' "$dev_tmux_log")" -ne 1 ]];
 fi
 
 : > "$dev_tmux_log"
-tmux_log="$dev_tmux_log" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" dev all >/dev/null
+tmux_log="$dev_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" dev all >/dev/null
 
 website_line="$(grep -Fnx "new-session -d -s node-dev -n dev -c $work_root/node_website" "$dev_tmux_log" | cut -d: -f1)"
 account_line="$(grep -Fnx "split-window -t node-dev:dev -c $work_root/node_account" "$dev_tmux_log" | cut -d: -f1)"
@@ -384,7 +391,7 @@ if [[ "$(grep -c '^split-window -t node-dev:dev -c ' "$dev_tmux_log")" -ne 2 ]];
 fi
 
 : > "$dev_tmux_log"
-tmux_log="$dev_tmux_log" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" dev all shell >/dev/null
+tmux_log="$dev_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" dev all shell >/dev/null
 
 admin_line="$(grep -Fnx "split-window -t node-dev:dev -c $work_root/node_admin" "$dev_tmux_log" | cut -d: -f1)"
 shell_line="$(grep -Fnx "split-window -t node-dev:dev -c $work_root" "$dev_tmux_log" | cut -d: -f1)"
@@ -414,7 +421,7 @@ if grep -Fq "send-keys -t node-dev:dev.3 npm run dev C-m" "$dev_tmux_log"; then
 fi
 
 : > "$dev_tmux_log"
-tmux_log="$dev_tmux_log" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=0 "$repo_root/bin/work" dev website >/dev/null
+tmux_log="$dev_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=0 "$repo_root/bin/work" dev website >/dev/null
 
 kill_line="$(grep -Fnx 'kill-session -t node-dev' "$dev_tmux_log" | cut -d: -f1)"
 new_session_line="$(grep -Fnx "new-session -d -s node-dev -n dev -c $work_root/node_website" "$dev_tmux_log" | cut -d: -f1)"
@@ -425,7 +432,25 @@ if [[ -z "$kill_line" || -z "$new_session_line" || "$kill_line" -ge "$new_sessio
   exit 1
 fi
 
-if WORK_NODE_ROOT="$work_root" TMUX=1 "$repo_root/bin/work" dev >/dev/null 2>"$tmp/work-dev-missing.err"; then
+: > "$dev_tmux_log"
+if tmux_log="$dev_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$tmp/missing-dev-root" TMUX=1 "$repo_root/bin/work" dev website >/dev/null 2>"$tmp/work-dev-missing-dir.err"; then
+  printf 'Expected work dev website with a missing directory to fail.\n' >&2
+  exit 1
+fi
+
+if ! grep -Fqx "Dev target directory does not exist: $tmp/missing-dev-root/node_website" "$tmp/work-dev-missing-dir.err"; then
+  printf 'Expected work dev missing directory error to stay clear; saw:\n' >&2
+  cat "$tmp/work-dev-missing-dir.err" >&2
+  exit 1
+fi
+
+if [[ -s "$dev_tmux_log" ]]; then
+  printf 'Expected work dev missing directory to fail before tmux mutation; saw:\n' >&2
+  cat "$dev_tmux_log" >&2
+  exit 1
+fi
+
+if PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 "$repo_root/bin/work" dev >/dev/null 2>"$tmp/work-dev-missing.err"; then
   printf 'Expected work dev with no targets to fail.\n' >&2
   exit 1
 fi
@@ -436,7 +461,7 @@ if ! grep -q '^Missing dev targets\.$' "$tmp/work-dev-missing.err"; then
   exit 1
 fi
 
-if WORK_NODE_ROOT="$work_root" TMUX=1 "$repo_root/bin/work" dev shell >/dev/null 2>"$tmp/work-dev-shell.err"; then
+if PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 "$repo_root/bin/work" dev shell >/dev/null 2>"$tmp/work-dev-shell.err"; then
   printf 'Expected work dev shell to fail without an app target.\n' >&2
   exit 1
 fi
@@ -447,7 +472,7 @@ if ! grep -q '^Invalid dev targets\.$' "$tmp/work-dev-shell.err"; then
   exit 1
 fi
 
-if WORK_NODE_ROOT="$work_root" TMUX=1 "$repo_root/bin/work" dev nope >/dev/null 2>"$tmp/work-dev-invalid.err"; then
+if PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 "$repo_root/bin/work" dev nope >/dev/null 2>"$tmp/work-dev-invalid.err"; then
   printf 'Expected work dev nope to fail.\n' >&2
   exit 1
 fi
