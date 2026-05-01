@@ -179,6 +179,7 @@ struct Command {
       repoCount: catalog.repos.count,
       commandCount: catalog.commands.count,
       actionCount: catalog.actions.count,
+      validation: catalog.validation,
       accessibilityTrusted: automation.accessibilityTrusted,
       appleEventsAvailable: automation.appleEventsAvailable,
       automationNotes: automation.notes
@@ -211,6 +212,7 @@ struct DiagnosticsReport: Codable, Equatable {
   var repoCount: Int
   var commandCount: Int
   var actionCount: Int
+  var validation: CatalogValidationReport
   var accessibilityTrusted: Bool
   var appleEventsAvailable: Bool
   var automationNotes: [String]

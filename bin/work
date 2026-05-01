@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+maestro_bin="${MAESTRO_BIN:-$repo_root/bin/maestro}"
+
 NODE_ROOT="${WORK_NODE_ROOT:-$HOME/Documents/Coding/node}"
 TOOLS_ROOT="${WORK_TOOLS_ROOT:-$HOME/Documents/Coding/maestro}"
 RESUME_ROOT="${WORK_RESUME_ROOT:-$HOME/Documents/Coding/resume}"
@@ -95,24 +98,6 @@ dev_targets_from_args() {
   return 0
 }
 
-create_windows() {
-  local session="$1"
-  local dir="$2"
-  shift 2
-
-  local first_window="$1"
-  shift
-
-  tmux new-session -d -s "$session" -n "$first_window" -c "$dir"
-
-  local window
-  for window in "$@"; do
-    tmux new-window -t "$session:" -n "$window" -c "$dir"
-  done
-
-  tmux select-window -t "$session:$first_window"
-}
-
 ensure_dir_exists() {
   local label="$1"
   local dir="$2"
@@ -181,6 +166,24 @@ run_dev_mode() {
   attach_or_switch "$session"
 }
 
+run_repo_mode() {
+  local repo="$1"
+  local dir
+
+  if ! dir="$(repo_dir "$repo")"; then
+    printf 'Unknown repo: %s\n\n' "$repo" >&2
+    usage >&2
+    exit 1
+  fi
+
+  if [[ ! -d "$dir" ]]; then
+    printf 'Repo directory does not exist: %s\n' "$dir" >&2
+    exit 1
+  fi
+
+  exec "$maestro_bin" repo open "$repo"
+}
+
 main() {
   if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
     usage
@@ -216,32 +219,7 @@ main() {
     exit 0
   fi
 
-  local repo="$1"
-  local dir
-
-  if ! dir="$(repo_dir "$repo")"; then
-    printf 'Unknown repo: %s\n\n' "$repo" >&2
-    usage >&2
-    exit 1
-  fi
-
-  if [[ ! -d "$dir" ]]; then
-    printf 'Repo directory does not exist: %s\n' "$dir" >&2
-    exit 1
-  fi
-
-  set_iterm_window_title "work:${repo}"
-  if ! tmux has-session -t "$repo" 2>/dev/null; then
-    local windows
-    case "$repo" in
-      tools|resume) windows=(Coding shell) ;;
-      *) windows=(coding1 coding2 dev shell) ;;
-    esac
-
-    create_windows "$repo" "$dir" "${windows[@]}"
-  fi
-
-  attach_or_switch "$repo"
+  run_repo_mode "$1"
 }
 
 main "$@"

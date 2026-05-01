@@ -8,6 +8,7 @@ public struct CatalogBundle: Equatable, Sendable {
   public var actions: [ActionDefinition]
   public var layouts: [LayoutDefinition]
   public var bundles: [BundleDefinition]
+  public var validation: CatalogValidationReport
 
   public init(
     repos: [RepoDefinition],
@@ -16,7 +17,8 @@ public struct CatalogBundle: Equatable, Sendable {
     configuredActions: [ActionDefinition],
     actions: [ActionDefinition],
     layouts: [LayoutDefinition],
-    bundles: [BundleDefinition]
+    bundles: [BundleDefinition],
+    validation: CatalogValidationReport = CatalogValidationReport()
   ) {
     self.repos = repos
     self.configuredCommands = configuredCommands
@@ -25,6 +27,7 @@ public struct CatalogBundle: Equatable, Sendable {
     self.actions = actions
     self.layouts = layouts
     self.bundles = bundles
+    self.validation = validation
   }
 }
 
@@ -61,7 +64,7 @@ public struct CatalogLoader {
       bundles: bundles
     )
 
-    return CatalogBundle(
+    var bundle = CatalogBundle(
       repos: repos,
       configuredCommands: configuredCommands,
       commands: commands,
@@ -70,6 +73,8 @@ public struct CatalogLoader {
       layouts: layouts,
       bundles: bundles
     )
+    bundle.validation = CatalogValidator().validate(bundle)
+    return bundle
   }
 
   public func loadDocument<T: Decodable>(_ filename: String, as type: T.Type) throws -> T {

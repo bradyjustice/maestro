@@ -19,7 +19,10 @@ public struct CommandCatalogBuilder {
     repos: [RepoDefinition],
     configuredCommands: [CommandDefinition]
   ) -> [CommandDefinition] {
-    var commandsByID = Dictionary(uniqueKeysWithValues: configuredCommands.map { ($0.id, $0) })
+    var commandsByID: [String: CommandDefinition] = [:]
+    for command in configuredCommands where commandsByID[command.id] == nil {
+      commandsByID[command.id] = command
+    }
 
     for repo in repos {
       let repoPath = pathResolver.resolve(repo.path)

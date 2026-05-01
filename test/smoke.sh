@@ -48,12 +48,26 @@ else
   swift run --package-path "$repo_root" maestro-core-checks >/dev/null
 fi
 "$repo_root/bin/maestro" repo list --json > "$tmp/maestro-repos.json"
+"$repo_root/bin/maestro" repo open account --dry-run --json > "$tmp/maestro-repo-open.json"
+"$repo_root/bin/maestro" command list --json > "$tmp/maestro-commands.json"
 "$repo_root/bin/maestro" action list --json > "$tmp/maestro-actions.json"
 "$repo_root/bin/maestro" diagnostics --json > "$tmp/maestro-diagnostics.json"
 
 if ! grep -q '"key" : "account"' "$tmp/maestro-repos.json"; then
   printf 'Expected maestro repo list JSON to include account; saw:\n' >&2
   cat "$tmp/maestro-repos.json" >&2
+  exit 1
+fi
+
+if ! grep -q '"iTermTitle" : "work:account"' "$tmp/maestro-repo-open.json"; then
+  printf 'Expected maestro repo open dry-run JSON to include the account title; saw:\n' >&2
+  cat "$tmp/maestro-repo-open.json" >&2
+  exit 1
+fi
+
+if ! grep -q '"id" : "account.dev"' "$tmp/maestro-commands.json"; then
+  printf 'Expected maestro command list JSON to include account.dev; saw:\n' >&2
+  cat "$tmp/maestro-commands.json" >&2
   exit 1
 fi
 
@@ -69,14 +83,35 @@ if ! grep -q '"stateDirectory"' "$tmp/maestro-diagnostics.json"; then
   exit 1
 fi
 
+if ! grep -q '"validation"' "$tmp/maestro-diagnostics.json" || ! grep -q '"ok" : true' "$tmp/maestro-diagnostics.json"; then
+  printf 'Expected maestro diagnostics JSON to include passing catalog validation; saw:\n' >&2
+  cat "$tmp/maestro-diagnostics.json" >&2
+  exit 1
+fi
+
 work_root="$tmp/work-node"
 repo_tmux_log="$tmp/work-repo-tmux.log"
 dev_tmux_log="$tmp/work-dev-tmux.log"
+fake_bin="$tmp/bin"
+mkdir -p "$fake_bin"
+cat > "$fake_bin/tmux" <<'TMUX'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >> "$tmux_log"
+if [[ "${1:-}" == "has-session" ]]; then
+  exit "${TMUX_HAS_SESSION_RESULT:-1}"
+fi
+exit 0
+TMUX
+chmod +x "$fake_bin/tmux"
 mkdir -p "$work_root/node_account"
 mkdir -p "$work_root/node_admin"
 mkdir -p "$work_root/node_website"
 mkdir -p "$work_root/node_plan"
 mkdir -p "$work_root/node_board"
+mkdir -p "$work_root/node_email"
+mkdir -p "$work_root/node_ux"
 tools_root="$tmp/maestro"
 mkdir -p "$tools_root"
 resume_root="$tmp/resume"
@@ -92,13 +127,16 @@ tmux() {
 export -f tmux
 export tmux_log
 
-tmux_log="$repo_tmux_log" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" node >/dev/null
-tmux_log="$repo_tmux_log" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" account >/dev/null
-tmux_log="$repo_tmux_log" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" admin >/dev/null
-tmux_log="$repo_tmux_log" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" plan >/dev/null
-tmux_log="$repo_tmux_log" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" board >/dev/null
-tmux_log="$repo_tmux_log" WORK_NODE_ROOT="$work_root" WORK_TOOLS_ROOT="$tools_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" tools >/dev/null
-tmux_log="$repo_tmux_log" WORK_RESUME_ROOT="$resume_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" resume >/dev/null
+tmux_log="$repo_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" node >/dev/null
+tmux_log="$repo_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" account >/dev/null
+tmux_log="$repo_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" admin >/dev/null
+tmux_log="$repo_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" plan >/dev/null
+tmux_log="$repo_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" board >/dev/null
+tmux_log="$repo_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" website >/dev/null
+tmux_log="$repo_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" email >/dev/null
+tmux_log="$repo_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" ux >/dev/null
+tmux_log="$repo_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" WORK_TOOLS_ROOT="$tools_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" tools >/dev/null
+tmux_log="$repo_tmux_log" PATH="$fake_bin:$PATH" WORK_RESUME_ROOT="$resume_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" resume >/dev/null
 
 if ! grep -q '^select-window -t node:coding1$' "$repo_tmux_log"; then
   printf 'Expected work node to select the first named window; saw:\n' >&2
@@ -108,6 +146,12 @@ fi
 
 if ! grep -q '^select-window -t account:coding1$' "$repo_tmux_log"; then
   printf 'Expected work to select the first named window; saw:\n' >&2
+  cat "$repo_tmux_log" >&2
+  exit 1
+fi
+
+if ! grep -Fqx "new-session -d -s account -n coding1 -c $work_root/node_account" "$repo_tmux_log"; then
+  printf 'Expected work account to use WORK_NODE_ROOT; saw:\n' >&2
   cat "$repo_tmux_log" >&2
   exit 1
 fi
@@ -148,6 +192,24 @@ if [[ "$(grep -c '^new-window -t board: -n ' "$repo_tmux_log")" -ne 3 ]]; then
   exit 1
 fi
 
+if ! grep -q '^select-window -t website:coding1$' "$repo_tmux_log"; then
+  printf 'Expected work website to select coding1; saw:\n' >&2
+  cat "$repo_tmux_log" >&2
+  exit 1
+fi
+
+if ! grep -q '^select-window -t email:coding1$' "$repo_tmux_log"; then
+  printf 'Expected work email to select coding1; saw:\n' >&2
+  cat "$repo_tmux_log" >&2
+  exit 1
+fi
+
+if ! grep -q '^select-window -t ux:coding1$' "$repo_tmux_log"; then
+  printf 'Expected work ux to select coding1; saw:\n' >&2
+  cat "$repo_tmux_log" >&2
+  exit 1
+fi
+
 if ! grep -q '^select-window -t tools:Coding$' "$repo_tmux_log"; then
   printf 'Expected work tools to select Coding; saw:\n' >&2
   cat "$repo_tmux_log" >&2
@@ -156,6 +218,12 @@ fi
 
 if ! grep -q '^new-session -d -s tools -n Coding -c ' "$repo_tmux_log"; then
   printf 'Expected work tools to create a Coding window; saw:\n' >&2
+  cat "$repo_tmux_log" >&2
+  exit 1
+fi
+
+if ! grep -Fqx "new-session -d -s tools -n Coding -c $tools_root" "$repo_tmux_log"; then
+  printf 'Expected work tools to use WORK_TOOLS_ROOT; saw:\n' >&2
   cat "$repo_tmux_log" >&2
   exit 1
 fi
@@ -184,6 +252,12 @@ if ! grep -q '^new-session -d -s resume -n Coding -c ' "$repo_tmux_log"; then
   exit 1
 fi
 
+if ! grep -Fqx "new-session -d -s resume -n Coding -c $resume_root" "$repo_tmux_log"; then
+  printf 'Expected work resume to use WORK_RESUME_ROOT; saw:\n' >&2
+  cat "$repo_tmux_log" >&2
+  exit 1
+fi
+
 if ! grep -q '^new-window -t resume: -n shell -c ' "$repo_tmux_log"; then
   printf 'Expected work resume to create a shell window; saw:\n' >&2
   cat "$repo_tmux_log" >&2
@@ -199,6 +273,28 @@ fi
 if grep -q ' -n test ' "$repo_tmux_log"; then
   printf 'Expected work not to create a test window; saw:\n' >&2
   cat "$repo_tmux_log" >&2
+  exit 1
+fi
+
+if PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$tmp/missing-node" TMUX=1 "$repo_root/bin/work" account >/dev/null 2>"$tmp/work-repo-missing.err"; then
+  printf 'Expected work account with a missing repo directory to fail.\n' >&2
+  exit 1
+fi
+
+if ! grep -Fqx "Repo directory does not exist: $tmp/missing-node/node_account" "$tmp/work-repo-missing.err"; then
+  printf 'Expected work missing repo directory error to stay clear; saw:\n' >&2
+  cat "$tmp/work-repo-missing.err" >&2
+  exit 1
+fi
+
+if PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 "$repo_root/bin/work" nope >/dev/null 2>"$tmp/work-repo-unknown.err"; then
+  printf 'Expected work with an unknown repo to fail.\n' >&2
+  exit 1
+fi
+
+if ! grep -q '^Unknown repo: nope$' "$tmp/work-repo-unknown.err"; then
+  printf 'Expected work unknown repo error to stay clear; saw:\n' >&2
+  cat "$tmp/work-repo-unknown.err" >&2
   exit 1
 fi
 

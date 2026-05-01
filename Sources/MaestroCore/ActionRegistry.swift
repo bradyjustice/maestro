@@ -10,7 +10,10 @@ public struct ActionRegistry: Sendable {
     layouts: [LayoutDefinition],
     bundles: [BundleDefinition]
   ) -> [ActionDefinition] {
-    var actionsByID = Dictionary(uniqueKeysWithValues: configuredActions.map { ($0.id, $0) })
+    var actionsByID: [String: ActionDefinition] = [:]
+    for action in configuredActions where actionsByID[action.id] == nil {
+      actionsByID[action.id] = action
+    }
 
     for repo in repos {
       let id = "repo.\(repo.key).open"

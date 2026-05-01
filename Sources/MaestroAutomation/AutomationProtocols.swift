@@ -56,7 +56,9 @@ public struct RepoOpenExecutor {
   }
 
   public func open(_ plan: RepoOpenPlan) throws {
-    guard fileManager.fileExists(atPath: plan.resolvedPath) else {
+    var isDirectory: ObjCBool = false
+    guard fileManager.fileExists(atPath: plan.resolvedPath, isDirectory: &isDirectory),
+          isDirectory.boolValue else {
       throw RepoOpenError.missingDirectory(plan.resolvedPath)
     }
 
