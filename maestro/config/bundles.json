@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "bundles": [
+    {
+      "id": "node.cockpit",
+      "label": "Node Cockpit",
+      "description": "Open the node workspace and apply the coding workspace layout.",
+      "actionIDs": [
+        "repo.node.open",
+        "layout.coding.workspace.apply"
+      ]
+    },
+    {
+      "id": "backend.cockpit",
+      "label": "Backend Cockpit",
+      "description": "Open account and admin development surfaces.",
+      "actionIDs": [
+        "repo.account.open",
+        "repo.admin.open",
+        "command.account.dev.run",
+        "command.admin.dev.run",
+        "layout.terminal.quad.apply"
+      ]
+    },
+    {
+      "id": "frontend.cockpit",
+      "label": "Frontend Cockpit",
+      "description": "Open website development and preview surfaces.",
+      "actionIDs": [
+        "repo.website.open",
+        "command.website.dev.run",
+        "layout.coding.workspace.apply"
+      ]
+    },
+    {
+      "id": "agent.reviewLoop",
+      "label": "Agent Review Loop",
+      "description": "Show agent status and arrange review surfaces.",
+      "actionIDs": [
+        "agent.status.show",
+        "layout.terminal.stack.apply"
+      ]
+    }
+  ]
+}

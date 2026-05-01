@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "actions": [
+    {
+      "id": "agent.status.show",
+      "label": "Agent Status",
+      "description": "Show active agent task status.",
+      "type": "agent",
+      "risk": "safe",
+      "confirmation": "none",
+      "repoKey": null,
+      "commandID": "agent.status",
+      "layoutID": null,
+      "bundleID": null,
+      "role": "status",
+      "enabled": true
+    }
+  ]
+}

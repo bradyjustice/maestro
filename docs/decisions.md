@@ -11,41 +11,55 @@ Decision: Maestro planning is split into `docs/prd.md`,
 `docs/architecture.md`, `docs/implementation-slices.md`, and
 `docs/decisions.md`.
 
-Rationale: The project needs node_board-style durable planning docs instead of
-a single chat-derived integration note.
+Rationale: The project needs durable planning docs instead of a single
+chat-derived integration note.
 
-### Maestro Owns The Source Of Truth
+### Native Dashboard Is The Primary Surface
 
-Decision: Maestro owns repo, command, action, tmux role, bundle, layout policy,
-and agent metadata. Hammerspoon, hotkeys, shell adapters, and future UI
-surfaces call into Maestro-owned actions.
+Decision: V1 is a Swift-native macOS app. The first primary surface is the
+`Maestro` dashboard, not a Hammerspoon overlay or a Node CLI.
 
-Rationale: One action system prevents drift between CLI behavior, hotkeys,
-overlays, and scripts.
+Rationale: Maestro should make repo, action, permission, agent, layout, risk,
+and result state visible before it automates high-leverage local workflows.
 
-### Local CLI Core
+### Swift Core Now
 
-Decision: V1 uses a dependency-light `bin/maestro` Node CLI core, not a
-Hammerspoon-only implementation.
+Decision: Core models, catalogs, action registry, risk policy, state paths,
+automation protocols, and JSON output are implemented in Swift packages.
 
-Rationale: Node gives safer structured JSON handling, atomic state management,
-and testable policy logic while fitting the existing local Node workflow.
+Rationale: Swift keeps the app, CLI, automation provider, tests, and state
+contracts in one native toolchain.
 
-### No Daemon In V1
+### Swift CLI Wrapper
 
-Decision: Maestro V1 is process-per-action and does not run a background daemon.
+Decision: The stable `maestro` command is a Swift CLI, launched by
+`bin/maestro` during development.
+
+Rationale: Existing shell commands need a durable CLI adapter while behavior
+migrates into the Swift core.
+
+### Direct macOS Automation First
+
+Decision: V1 automation uses native macOS APIs first: `NSWorkspace`,
+Accessibility APIs, and Apple Events/AppleScript only for iTerm-specific gaps.
+
+Rationale: A native app should own its macOS automation path directly before
+adding optional external providers.
+
+### Hammerspoon Is Future Optional
+
+Decision: Hammerspoon is no longer the V1 host. It can later become a modular
+`HammerspoonProvider` that implements Maestro automation protocols.
+
+Rationale: Keeping Hammerspoon optional avoids making Lua and an external host
+the primary product boundary while preserving a future hotkey/overlay path.
+
+### No Daemon In First Dashboard Slice
+
+Decision: Maestro does not run a background daemon in the first native slice.
 
 Rationale: A daemon adds lifecycle, observability, and recovery complexity
-before the action model is proven.
-
-### Hammerspoon Is An Adapter
-
-Decision: Hammerspoon owns hotkeys, overlays, screen-aware window layout, app
-focus, and iTerm window creation. It does not own source-of-truth action policy
-or durable state.
-
-Rationale: Hammerspoon is the right macOS automation host, but policy and state
-need to be testable outside the UI layer.
+before the dashboard and action model are proven.
 
 ### Preserve Shell Compatibility
 
@@ -55,10 +69,18 @@ migration.
 Rationale: Existing terminal ergonomics should not break while behavior moves
 behind Maestro.
 
+### Checked-In JSON Catalogs
+
+Decision: Use checked-in JSON files under `maestro/config/` for data-only repo,
+command, action, layout, and bundle definitions.
+
+Rationale: Catalogs should be readable by tests, the CLI, the dashboard, and
+future providers without executing code.
+
 ### Package Scripts Are Inputs, Not Policy
 
 Decision: Package scripts may be discovered automatically, but execution policy
-comes from Maestro metadata.
+comes from Maestro metadata and Swift risk classification.
 
 Rationale: Script names and shell bodies are not enough to safely infer deploy,
 production, remote, migration, or destructive behavior.
@@ -74,10 +96,11 @@ Cloudflare, D1, production deploys, and destructive reset helpers.
 
 ### Core-Enforced Confirmations
 
-Decision: Risk-tier confirmations are enforced in Maestro core, not only in
-Hammerspoon.
+Decision: Risk-tier confirmations are enforced in Maestro core, not only in the
+dashboard or a future automation adapter.
 
-Rationale: CLI and adapter callers need the same safety boundary.
+Rationale: CLI, dashboard, shell adapter, and external-provider callers need
+the same safety boundary.
 
 ### No Eval For Maestro Execution
 
@@ -99,8 +122,8 @@ singleton reuse/focus behavior.
 Decision: Long-running singleton roles reuse or focus existing targets by
 default. Restart requires an explicit flag or action.
 
-Rationale: Duplicate dev servers, previews, and agents waste resources and
-make local state hard to reason about.
+Rationale: Duplicate dev servers, previews, and agents waste resources and make
+local state hard to reason about.
 
 ### JSON Agent State
 
@@ -147,7 +170,7 @@ not become a secret sink.
 Decision: Existing fixed-coordinate iTerm scripts are retained as compatibility
 inputs, not the future layout engine.
 
-Rationale: Screen-aware Hammerspoon geometry is more durable across laptop,
+Rationale: Screen-aware native layout planning is more durable across laptop,
 external, ultrawide, and TV display setups.
 
 ### Slice Review Gate
@@ -160,25 +183,27 @@ drift and safety regressions should be caught early.
 
 ## Defaults Pending Confirmation
 
-### Config Format
-
-Default: Use checked-in JSON or `.mjs` config modules under `maestro/`, with a
-preference for JSON where data-only definitions are sufficient.
-
-### Hammerspoon Install Shape
-
-Default: Keep Hammerspoon config repo-owned and symlink or install it through
-Maestro, matching the existing install pattern.
-
 ### First Bundle Set
 
 Default: Ship Node cockpit, backend cockpit, frontend cockpit, and agent review
 loop first.
 
-## Decisions To Lock Before Coding
+### App Packaging
 
-- Final config file format and directory layout.
+Default: Use SwiftPM for package and CLI development now. Add Xcode project or
+workspace packaging when full Xcode is installed and app bundle signing is
+needed.
+
+### Launch At Login
+
+Default: Defer launch-at-login. Use `SMAppService` later instead of ad hoc
+login item scripts.
+
+## Decisions To Lock Before Risky Execution Migration
+
 - Exact first V1 bundle set.
 - Schema versioning and migration command names for Maestro state.
-- PRD acceptance.
-- Architecture acceptance.
+- App bundle packaging and signing shape.
+- Audit event retention policy.
+- PRD approver.
+- Architecture approver.

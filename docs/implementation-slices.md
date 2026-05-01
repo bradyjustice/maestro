@@ -1,54 +1,138 @@
-# Maestro Implementation Slices
+# Maestro Native macOS Implementation Slices
 
-Status: Draft for acceptance.
+Status: Accepted direction, May 1, 2026.
 
-Use this file to assign one bounded implementation scope at a time after the
-PRD and architecture are accepted. Do not run parallel write agents by default.
+Use this file to assign one bounded implementation scope at a time. Do not run
+parallel write agents by default.
 
 Implementation preconditions:
 
-- `docs/prd.md` is accepted with date and approver.
-- `docs/architecture.md` is accepted with date and approver.
-- Any decision that changes CLI shape, state location, or compatibility
-  behavior is recorded in `docs/decisions.md`.
+- `docs/prd.md` reflects the accepted Swift-native direction.
+- `docs/architecture.md` reflects the accepted Swift-native direction.
+- Any decision that changes CLI shape, state location, automation strategy, or
+  compatibility behavior is recorded in `docs/decisions.md`.
 - Previous implementation slice, if any, has passed read-only review.
 
-## Slice 1: Maestro Core Scaffold
+## Slice 0: Planning Redirect
+
+Write scope:
+
+- `docs/prd.md`
+- `docs/architecture.md`
+- `docs/decisions.md`
+- `docs/implementation-slices.md`
+- related README notes if needed
+
+Acceptance:
+
+- Swift-native dashboard, Swift core, and direct macOS automation are the
+  accepted direction.
+- Hammerspoon is documented as a future optional provider, not the V1 host.
+- Existing shell commands remain compatibility adapters during migration.
+- State paths remain `$XDG_STATE_HOME/local-tools/maestro`,
+  `$HOME/.local/state/local-tools/maestro`, and `MAESTRO_STATE_DIR`.
+
+Reviewer focus:
+
+- No remaining canonical doc points to Node as the target implementation.
+- No remaining canonical doc makes Hammerspoon the V1 host.
+- Migration is explicit and preserves current command names.
+
+## Slice 1: Native App And Package Scaffold
+
+Write scope:
+
+- `Package.swift`
+- `Sources/MaestroApp`
+- `Sources/MaestroCore`
+- `Sources/MaestroAutomation`
+- `Sources/MaestroCLI`
+- `maestro/config/*.json`
+- focused tests
+
+Acceptance:
+
+- Swift package defines `Maestro`, `MaestroCore`, `MaestroAutomation`, and
+  `maestro-cli` products, with `bin/maestro` preserving the public command
+  name.
+- Native dashboard shell loads catalog-backed repo/action data.
+- Dashboard shows permission status cards, repo/action/agent sections, layouts,
+  bundles, and non-mutating detail views.
+- Direct macOS automation protocols exist, with a native provider for app
+  launch/focus and permission checks.
+- Checked-in JSON catalogs define repos, commands, actions, layouts, and
+  bundles.
+- `swift run maestro-core-checks` passes for core catalog and risk-policy
+  behavior on command-line tools; migrate to `swift test` when the local
+  toolchain exposes `XCTest` or Swift Testing.
+
+Reviewer focus:
+
+- App shell is useful and restrained, not a marketing page.
+- Core models are Codable and stable enough for app/CLI/tests.
+- No risky execution moves behind unreviewed native code.
+
+## Slice 2: Swift Core Models And Catalogs
+
+Write scope:
+
+- Codable schemas for repos, commands, actions, agents, risk tiers, tmux roles,
+  layouts, bundles, audit events, and JSON error output.
+- Catalog loading and validation.
+- Package script discovery and conservative risk classification.
+- Tests for catalog shape, state paths, risk policy, action generation, and JSON
+  errors.
+
+Acceptance:
+
+- Maestro can load checked-in JSON catalogs without external dependencies.
+- Package scripts are discovered when repo package files exist.
+- Safe local scripts can be classified automatically.
+- Deploy, prod, remote, migration, reset, and destructive-looking scripts are
+  blocked or require explicit confirmation.
+- JSON error output follows the architecture shape.
+
+Reviewer focus:
+
+- Conservative risk defaults.
+- Schema versioning.
+- Codable stability.
+- No `eval`.
+
+## Slice 3: Swift CLI Parity Foundation
 
 Write scope:
 
 - `bin/maestro`
-- initial `maestro/` modules and config files
-- minimal tests and smoke-test wiring
+- `Sources/MaestroCLI`
+- install, doctor, and smoke-test wiring
 
 Acceptance:
 
 - `maestro --help` works.
 - `maestro repo list --json` returns configured repo records.
-- Config loads without external dependencies.
-- JSON errors follow the architecture shape.
-- Existing scripts are not yet migrated.
+- `maestro repo open <repo> --dry-run --json` returns a tmux-compatible plan.
+- `maestro command list --json` returns configured and discovered commands.
+- `maestro action list --json` returns generated actions.
+- `maestro diagnostics --json` reports config path, state path, catalog counts,
+  and native permission state.
+- Existing scripts are not yet required to delegate to Swift.
 
 Reviewer focus:
 
 - CLI boundaries.
-- Dependency-light Node implementation.
-- No daemon behavior.
+- Dependency-light Swift implementation.
+- JSON shape stability.
 - No behavior moved from `work` or `agent-*` before compatibility tests exist.
 
-Gate to next slice:
-
-- Read-only review is complete and findings are resolved, deferred, or recorded
-  as blockers.
-
-## Slice 2: Repository Catalog And `work` Open Compatibility
+## Slice 4: Work Migration
 
 Write scope:
 
-- repo catalog
-- `maestro repo open <repo>`
+- repo-open execution
 - `work <repo>` adapter path
-- smoke tests for existing workspace opens
+- role-backed `work dev <target...>`
+- smoke tests for existing workspace opens and dev pane ordering
 
 Acceptance:
 
@@ -56,112 +140,49 @@ Acceptance:
   `work website`, `work email`, `work ux`, `work tools`, and `work resume`
   preserve current tmux session/window behavior.
 - Environment overrides for node, tools, and resume roots still work.
+- `work dev website`, `work dev website account`, `work dev all`, and
+  `work dev all shell` preserve current ordering and shell-pane behavior.
 - iTerm title behavior remains compatible.
 
 Reviewer focus:
 
 - Exact compatibility with current `work` behavior.
 - Repo path validation.
-- No regression in tmux attach/switch behavior.
-
-Gate to next slice:
-
-- Read-only review is complete and findings are resolved, deferred, or recorded
-  as blockers.
-
-## Slice 3: Command Catalog And Risk Policy
-
-Write scope:
-
-- package script discovery
-- command metadata overlays
-- risk classification and confirmation enforcement
-- command list JSON output
-
-Acceptance:
-
-- `maestro command list --json` shows discovered scripts and policy metadata.
-- Safe local scripts can be classified automatically.
-- Deploy, prod, remote, migration, reset, and destructive-looking scripts are
-  blocked until explicitly classified.
-- Production and destructive actions require typed confirmation in Maestro
-  core.
-
-Reviewer focus:
-
-- Conservative default policy.
-- No `eval`.
-- Stable metadata that Hammerspoon can display.
-- Clear operator context for staging, production, and destructive actions.
-
-Gate to next slice:
-
-- Read-only review is complete and findings are resolved, deferred, or recorded
-  as blockers.
-
-## Slice 4: Tmux Role Execution
-
-Write scope:
-
-- tmux role resolver
-- `maestro command run <repo> <script>`
-- singleton reuse/focus and explicit restart
-- `work dev <target...>` adapter path
-
-Acceptance:
-
-- Dev, preview, check, build, deploy, migration, shell, agent, and status roles
-  can be represented.
-- Long-running singleton roles reuse or focus by default.
-- `--restart` restarts only the targeted role.
-- `work dev website`, `work dev website account`, `work dev all`, and
-  `work dev all shell` preserve current ordering and shell-pane behavior.
-
-Reviewer focus:
-
 - Role targeting instead of raw pane assumptions.
-- Stale session/window/pane recovery.
-- No accidental termination of unrelated panes.
+- No accidental termination of unrelated panes after singleton behavior
+  changes.
 
-Gate to next slice:
-
-- Read-only review is complete and findings are resolved, deferred, or recorded
-  as blockers.
-
-## Slice 5: Hammerspoon Action And Layout Adapter
+## Slice 5: Direct macOS Automation Provider
 
 Write scope:
 
-- Hammerspoon modules under repo-owned config path if introduced
-- action listing and running through `maestro action ...`
-- screen-aware iTerm/editor/Codex/browser layout functions
-- doctor checks for Hammerspoon and iTerm expectations
+- native window inventory and layout planning
+- screen-aware layout execution
+- permission onboarding states
+- iTerm Apple Events where native APIs are insufficient
+- doctor checks for permissions and iTerm expectations
 
 Acceptance:
 
-- Hammerspoon can list Maestro actions in a chooser or command center.
-- Safe local actions run from Hammerspoon.
-- Risky actions show context and defer to Maestro core confirmation.
+- Dashboard shows Accessibility and Automation recovery states.
 - Terminal stack, quad, six-up, and coding workspace layouts use screen-aware
   geometry.
+- Layouts work across laptop, external, ultrawide, and TV display setups.
 - Unmanaged windows are left untouched unless the active layout includes them.
+- Missing permissions produce clear recoverable errors.
 
 Reviewer focus:
 
-- Hammerspoon remains adapter-only.
-- Layout math across laptop, external, ultrawide, and TV displays.
+- Direct macOS provider stays behind protocols.
+- Layout math and screen selection.
 - No hard-coded coordinate regression.
-
-Gate to next slice:
-
-- Read-only review is complete and findings are resolved, deferred, or recorded
-  as blockers.
+- Apple Events are scoped to iTerm gaps.
 
 ## Slice 6: Agent State Store
 
 Write scope:
 
-- Maestro agent JSON state store
+- Swift agent JSON state store
 - private review artifact paths
 - legacy `.env` registry reader
 - state transition tests
@@ -180,11 +201,6 @@ Reviewer focus:
 - No loss of existing worktrees or review artifacts.
 - Private file permissions.
 - Migration behavior is read-safe before any rewrite behavior exists.
-
-Gate to next slice:
-
-- Read-only review is complete and findings are resolved, deferred, or recorded
-  as blockers.
 
 ## Slice 7: Agent Command Migration
 
@@ -212,18 +228,14 @@ Reviewer focus:
 - Review artifact reliability.
 - Dirty worktree cleanup refusal.
 
-Gate to next slice:
-
-- Read-only review is complete and findings are resolved, deferred, or recorded
-  as blockers.
-
-## Slice 8: Macro Bundles
+## Slice 8: Bundles And Cockpit Workflows
 
 Write scope:
 
 - bundle definitions
 - `maestro action list|run`
-- initial cockpit and review-loop bundles
+- dashboard bundle controls
+- Node cockpit, backend cockpit, frontend cockpit, and agent review loop
 - focused tests for bundle expansion
 
 Acceptance:
@@ -239,17 +251,13 @@ Reviewer focus:
 - Deterministic action ordering.
 - Useful progressive expansion for terminal layouts.
 
-Gate to next slice:
-
-- Read-only review is complete and findings are resolved, deferred, or recorded
-  as blockers.
-
-## Slice 9: Hardening, Documentation, And Rollout
+## Slice 9: Packaging And Hardening
 
 Write scope:
 
 - README and docs updates
-- doctor checks
+- `install.sh`, `doctor.sh`, and uninstall updates
+- app bundle packaging when full Xcode is installed
 - audit log review helpers
 - final smoke checklist
 - old script deprecation notes where appropriate
@@ -258,10 +266,11 @@ Acceptance:
 
 - Smoke tests pass for `work`, `agent-*`, and Maestro JSON interfaces.
 - Doctor checks cover Maestro config, state directory, tmux, git, Codex,
-  Hammerspoon, iTerm, and required profiles.
+  iTerm, native permissions, and required profiles.
 - Documentation explains install, state paths, risk policy, compatibility
-  adapters, and recovery from stale tmux/agent state.
+  adapters, permissions, and rollback.
 - Existing fixed-coordinate iTerm scripts are documented as compatibility only.
+- Launch-at-login remains deferred or is implemented through `SMAppService`.
 
 Reviewer focus:
 
@@ -269,8 +278,3 @@ Reviewer focus:
 - Recovery paths.
 - No secrets in docs or logs.
 - Clear acceptance checklist before relying on Maestro daily.
-
-Gate to release:
-
-- Read-only review is complete and findings are resolved, deferred, or recorded
-  as blockers.

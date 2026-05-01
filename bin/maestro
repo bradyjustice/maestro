@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export MAESTRO_CONFIG_DIR="${MAESTRO_CONFIG_DIR:-$repo_root/maestro/config}"
+
+if [[ -x "$repo_root/.build/release/maestro-cli" ]]; then
+  exec "$repo_root/.build/release/maestro-cli" "$@"
+fi
+
+if [[ -x "$repo_root/.build/debug/maestro-cli" ]]; then
+  exec "$repo_root/.build/debug/maestro-cli" "$@"
+fi
+
+exec swift run --package-path "$repo_root" maestro-cli "$@"

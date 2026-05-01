@@ -10,6 +10,7 @@ force=0
 cleanup_legacy=0
 
 managed_commands=(
+  maestro
   agent-lib
   agent-start
   agent-status

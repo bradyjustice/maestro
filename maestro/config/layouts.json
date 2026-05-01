@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "layouts": [
+    {
+      "id": "terminal.stack",
+      "label": "Terminal Stack",
+      "description": "Arrange terminal windows in a focused vertical stack on the active display.",
+      "slots": [
+        {
+          "id": "primary-terminal",
+          "app": "iTerm",
+          "role": "terminal",
+          "unit": "right-half"
+        }
+      ]
+    },
+    {
+      "id": "terminal.quad",
+      "label": "Terminal Quad",
+      "description": "Arrange four iTerm windows across the active display quadrants.",
+      "slots": [
+        {
+          "id": "top-left-terminal",
+          "app": "iTerm",
+          "role": "terminal",
+          "unit": "top-left"
+        },
+        {
+          "id": "top-right-terminal",
+          "app": "iTerm",
+          "role": "terminal",
+          "unit": "top-right"
+        },
+        {
+          "id": "bottom-left-terminal",
+          "app": "iTerm",
+          "role": "terminal",
+          "unit": "bottom-left"
+        },
+        {
+          "id": "bottom-right-terminal",
+          "app": "iTerm",
+          "role": "terminal",
+          "unit": "bottom-right"
+        }
+      ]
+    },
+    {
+      "id": "coding.workspace",
+      "label": "Coding Workspace",
+      "description": "Place editor, terminal, Codex, and browser surfaces into a coding workspace.",
+      "slots": [
+        {
+          "id": "editor",
+          "app": "Visual Studio Code",
+          "role": "editor",
+          "unit": "left-two-thirds"
+        },
+        {
+          "id": "terminal",
+          "app": "iTerm",
+          "role": "terminal",
+          "unit": "right-third"
+        },
+        {
+          "id": "browser",
+          "app": "Safari",
+          "role": "browser",
+          "unit": "center"
+        }
+      ]
+    }
+  ]
+}

@@ -6,6 +6,7 @@ bin_dir="${LOCAL_TOOLS_BIN_DIR:-$HOME/.local/bin}"
 failures=0
 
 managed_commands=(
+  maestro
   agent-lib
   agent-start
   agent-status
@@ -21,6 +22,7 @@ managed_commands=(
 )
 
 bash_scripts=(
+  maestro
   agent-lib
   agent-start
   agent-status
@@ -41,6 +43,7 @@ zsh_scripts=(
 dependencies=(
   bash
   zsh
+  swift
   git
   tmux
   codex

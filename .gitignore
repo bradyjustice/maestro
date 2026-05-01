@@ -17,10 +17,12 @@ pnpm-debug.log*
 !.env.example
 
 # Build and coverage output
+.build/
 dist/
 build/
 coverage/
 .cache/
+DerivedData/
 
 # Editor files
 .vscode/

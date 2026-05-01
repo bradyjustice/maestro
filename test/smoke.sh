@@ -41,6 +41,34 @@ if "$repo_root/bin/work" --help | grep -q '\.\./'; then
   exit 1
 fi
 
+"$repo_root/bin/maestro" --help >/dev/null
+if [[ -x "$repo_root/.build/debug/maestro-core-checks" ]]; then
+  "$repo_root/.build/debug/maestro-core-checks" >/dev/null
+else
+  swift run --package-path "$repo_root" maestro-core-checks >/dev/null
+fi
+"$repo_root/bin/maestro" repo list --json > "$tmp/maestro-repos.json"
+"$repo_root/bin/maestro" action list --json > "$tmp/maestro-actions.json"
+"$repo_root/bin/maestro" diagnostics --json > "$tmp/maestro-diagnostics.json"
+
+if ! grep -q '"key" : "account"' "$tmp/maestro-repos.json"; then
+  printf 'Expected maestro repo list JSON to include account; saw:\n' >&2
+  cat "$tmp/maestro-repos.json" >&2
+  exit 1
+fi
+
+if ! grep -q '"id" : "repo.account.open"' "$tmp/maestro-actions.json"; then
+  printf 'Expected maestro action list JSON to include repo.account.open; saw:\n' >&2
+  cat "$tmp/maestro-actions.json" >&2
+  exit 1
+fi
+
+if ! grep -q '"stateDirectory"' "$tmp/maestro-diagnostics.json"; then
+  printf 'Expected maestro diagnostics JSON to include stateDirectory; saw:\n' >&2
+  cat "$tmp/maestro-diagnostics.json" >&2
+  exit 1
+fi
+
 work_root="$tmp/work-node"
 repo_tmux_log="$tmp/work-repo-tmux.log"
 dev_tmux_log="$tmp/work-dev-tmux.log"

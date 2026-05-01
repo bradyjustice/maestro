@@ -1,59 +1,74 @@
-# Maestro V1 Architecture
+# Maestro Native macOS Architecture
 
-Status: Draft for acceptance.
+Status: Accepted direction, May 1, 2026.
 
 Source references:
 
 - `docs/prd.md`
 - `docs/maestro-work-agent-integration-plan.md`
 - `docs/research/hammerspoon-agentic-coding-window-management.md`
+- `docs/research/jony-ive-design-principles.md`
 - Existing `bin/work`, `bin/agent-*`, and `bin/iterm-*` scripts
-- Node Social Club package script conventions in sibling repos
 
 ## Summary
 
-Maestro is a local control-plane core with multiple adapters. The authoritative
-runtime is a dependency-light `bin/maestro` CLI implemented with Node `.mjs`
-modules. Hammerspoon is the macOS presentation adapter for hotkeys, overlays,
-screen detection, app focus, and iTerm window control. Existing shell commands
-become compatibility adapters over the same Maestro action system.
+Maestro is a Swift-native macOS app with a Swift-owned core and compatibility
+shell adapters. The primary runtime surface is the `Maestro` dashboard. The
+stable command-line entrypoint is a Swift `maestro` CLI. Existing shell scripts
+remain public compatibility commands until each behavior reaches native parity.
 
-V1 intentionally avoids a daemon. Each invocation loads config and state,
-evaluates policy, performs one action or query, writes durable state and audit
-records when needed, and exits.
+Direct macOS automation is the first provider:
+
+- `NSWorkspace` launches and focuses apps.
+- Accessibility APIs inventory and place windows.
+- Apple Events/AppleScript are used only where iTerm requires them.
+- Hammerspoon can become an optional provider later by implementing the same
+  automation protocols.
+
+V1 still avoids a long-running daemon. App and CLI invocations load catalogs
+and state, evaluate policy, perform one action or query, write state/audit
+records when needed, and return.
 
 ## Runtime Shape
 
 Topology:
 
 ```text
-Hammerspoon hotkeys/overlay
+SwiftUI/AppKit dashboard: Maestro
 Existing shell adapters: work, agent-*
 Direct CLI: maestro ...
+Future optional providers: Hammerspoon, hotkeys, overlays
         |
         v
-bin/maestro Node CLI core
+Swift packages
+  MaestroCore
+  MaestroAutomation
+  MaestroCLI
         |
         +-- repo and command catalogs
         +-- action registry and risk policy
-        +-- tmux orchestration
+        +-- tmux/git/process/iTerm/window automation protocols
         +-- agent state store
         +-- audit log
         |
         v
-tmux / iTerm / git / npm / codex / wrangler
+tmux / iTerm / git / npm / codex / wrangler / macOS APIs
 ```
 
 Primary components:
 
-- `bin/maestro`: stable user and adapter entrypoint.
-- `maestro/`: repo-owned config, catalog definitions, policy metadata, and
-  core modules.
-- `work`: compatibility adapter for workspace and dev commands.
-- `agent-*`: compatibility adapters for agent lifecycle commands.
-- Hammerspoon config: invokes Maestro JSON actions and handles windows.
-- iTerm: terminal window host.
-- tmux: repo/session/process topology.
+- `Sources/MaestroApp`: native SwiftUI/AppKit dashboard target, packaged as
+  the `Maestro` executable product.
+- `Sources/MaestroCore`: data models, catalogs, action registry, risk policy,
+  state paths, JSON error shapes, and compatibility plans.
+- `Sources/MaestroAutomation`: direct macOS automation, process execution, tmux
+  execution, and provider protocols.
+- `Sources/MaestroCLI`: Swift command-line target, packaged as the
+  `maestro-cli` executable product and exposed through `bin/maestro`.
+- `maestro/config/*.json`: checked-in data-only catalogs.
+- `bin/maestro`: wrapper that runs the Swift CLI from this repo.
+- `bin/work` and `bin/agent-*`: compatibility adapters retained during
+  migration.
 
 ## Public Interfaces
 
@@ -61,13 +76,11 @@ Initial CLI surface:
 
 ```text
 maestro repo list --json
-maestro repo open <repo>
+maestro repo open <repo> [--json] [--dry-run]
 
 maestro command list [--repo <repo>] --json
-maestro command run <repo> <script> [--restart] [--confirm <token>]
-
 maestro action list --json
-maestro action run <action-id> [--json] [--confirm <token>]
+maestro diagnostics --json
 
 maestro agent start <repo|repo-path> <task-slug> [prompt]
 maestro agent status [--json]
@@ -78,12 +91,17 @@ maestro agent attach <task>
 maestro agent focus <task>
 ```
 
+The agent commands above are target surface, not all implemented in the first
+scaffold slice.
+
 Adapter compatibility:
 
-- `work <repo>` maps to `maestro repo open <repo>`.
-- `work dev <target...>` maps to Maestro command and tmux role actions.
+- `work <repo>` remains usable while Swift repo-open behavior is verified.
+- `work dev <target...>` remains shell-owned until role-based Swift execution
+  preserves current tmux behavior.
 - `agent-start`, `agent-status`, `agent-review`, `agent-mark`, and
-  `agent-clean` map to `maestro agent ...`.
+  `agent-clean` remain usable until Swift-backed state and command parity are
+  proven.
 - Existing command output remains human-readable unless a caller requests JSON.
 
 Error shape for JSON output:
@@ -106,7 +124,7 @@ Repository records include:
 - tmux session
 - default tmux windows
 - default roles
-- preferred terminal profile or layout hints
+- preferred layout hint
 - optional package script discovery settings
 
 Command records include:
@@ -121,9 +139,9 @@ Command records include:
 - confirmation policy
 - display label and description
 
-Action records are generated from repo, command, agent, tmux, layout, and bundle
-definitions. UI buttons, hotkeys, bundles, CLI commands, `work`, and `agent-*`
-all run these same registered actions.
+Action records are generated from repo, command, agent, layout, and bundle
+definitions. Dashboard controls, CLI commands, shell adapters, and future
+automation providers all run these same registered actions.
 
 Package scripts are discoverable inputs. The command catalog may auto-classify
 obvious local `dev`, `check`, `test`, `build`, and `preview` scripts, but
@@ -184,6 +202,24 @@ Role behavior:
 `work dev all` compatibility maps to website, account, and admin dev-server
 roles in the existing order, with optional shell role last.
 
+## Native macOS Automation
+
+`MaestroAutomation` owns provider protocols and the direct native provider.
+
+Responsibilities:
+
+- launch/focus apps through `NSWorkspace`
+- inspect permission state
+- request Accessibility onboarding when the UI asks
+- inventory and place windows through Accessibility APIs
+- use Apple Events only for iTerm behaviors not exposed through public AppKit
+  or Accessibility APIs
+- run tmux/git/npm/codex/wrangler through argv arrays, not `eval`
+
+The dashboard must show permission state and recovery paths. Automation
+execution must treat missing permissions as an explicit recoverable state, not
+as a silent no-op.
+
 ## Agent Lifecycle
 
 Supported states:
@@ -204,7 +240,7 @@ resolve repo
 validate task slug
 derive branch and task ID
 create git worktree
-write task record
+write private task record
 launch Codex in scrubbed environment unless launch is skipped
 record tmux target and audit entry
 ```
@@ -228,85 +264,18 @@ Clean flow:
 Prompts and sensitive environment values are not emitted in status tables or
 audit logs.
 
-## Hammerspoon And Windowing
-
-Hammerspoon is an adapter, not the source of truth for action policy or state.
-
-Responsibilities:
-
-- bind hotkeys
-- render command center or chooser UI
-- call `maestro action list --json`
-- call `maestro action run ...`
-- enforce additional UI confirmation where helpful
-- create/focus iTerm windows
-- arrange app windows using screen-aware geometry
-- keep unmanaged windows untouched unless a layout profile includes them
-
-Layout engine requirements:
-
-- derive frames from active display dimensions
-- support screen-under-mouse placement
-- support terminal stack, quad, six-up, coding workspace, and cockpit layouts
-- handle laptop-only, external display, ultrawide, and TV display setups
-- retain current iTerm profile compatibility while phasing out fixed
-  coordinates
-
 ## Security Model
 
 - Maestro core enforces risk policy and confirmations.
-- Hammerspoon confirmations are convenience UI, not the security boundary.
+- UI confirmations are convenience presentation, not the security boundary.
 - No Maestro-owned execution uses `eval`.
 - Package scripts execute as argv arrays such as `npm run <script>`.
-- Explicit non-package commands must be represented as argv arrays in config.
-- Agent launch scrubs sensitive environment variables by default.
-- Secret inheritance requires an explicit opt-in.
-- Audit logs include action context, risk, target, result, and redacted command
-  summaries only.
-- Production and destructive actions require typed confirmation tokens tied to
-  the target action.
+- Production and destructive actions require typed confirmation.
+- Agent launches scrub sensitive environment variables by default.
 
-## Testing Strategy
+## Packaging
 
-Unit tests:
-
-- repo path resolution and environment overrides
-- package script discovery and metadata overlay precedence
-- risk classification and blocking of unclassified risky scripts
-- confirmation token requirements
-- redaction of prompts, secrets, and command summaries
-- agent JSON read/write, legacy `.env` read, state transitions, and archive
-
-Tmux tests with mocked `tmux`:
-
-- session creation
-- role creation
-- singleton reuse/focus
-- explicit restart
-- `work dev` compatibility ordering
-- stale target recovery
-
-Adapter smoke tests:
-
-- `work <repo>`
-- `work dev website`, `work dev all`, and `work dev all shell`
-- each `agent-*` command shape
-- JSON output for Hammerspoon callers
-
-Manual acceptance:
-
-- Hammerspoon lists actions from Maestro.
-- Safe local command runs from the overlay.
-- Production/destructive command is blocked without typed confirmation.
-- Workspace launch and layout reflow work across active displays.
-- Agent task can be started, reviewed, marked, focused, and cleaned.
-
-## Risks And Open Decisions
-
-- Config file format and module boundary need final acceptance before coding.
-- Hammerspoon overlay implementation may be incremental if command-line parity
-  lands first.
-- Legacy `.env` task import must be careful to avoid corrupting active work.
-- Long-running process detection can drift from tmux reality and needs stale
-  target recovery from the first implementation.
-- Architecture acceptance date and approver are still required before coding.
+The Swift package is the source build system in this repo. Full `.app` bundle
+packaging requires full Xcode; command-line tools can build and test the Swift
+packages and CLI. Launch-at-login is deferred and should use `SMAppService`
+after the dashboard is packaged.

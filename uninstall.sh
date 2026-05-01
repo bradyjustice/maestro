@@ -6,6 +6,7 @@ bin_dir="${LOCAL_TOOLS_BIN_DIR:-$HOME/.local/bin}"
 dry_run=0
 
 managed_commands=(
+  maestro
   agent-lib
   agent-start
   agent-status
