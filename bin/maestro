@@ -1,7 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+resolve_script_dir() {
+  local source="${BASH_SOURCE[0]}"
+  local dir
+
+  while [[ -L "$source" ]]; do
+    dir="$(cd -P "$(dirname "$source")" && pwd)"
+    source="$(readlink "$source")"
+    [[ "$source" == /* ]] || source="$dir/$source"
+  done
+
+  cd -P "$(dirname "$source")" && pwd
+}
+
+script_dir="$(resolve_script_dir)"
+repo_root="$(cd "$script_dir/.." && pwd)"
 export MAESTRO_CONFIG_DIR="${MAESTRO_CONFIG_DIR:-$repo_root/maestro/config}"
 
 if [[ -x "$repo_root/.build/release/maestro-cli" ]]; then

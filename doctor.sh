@@ -280,6 +280,40 @@ check_iterm() {
   done
 }
 
+check_maestro_diagnostics() {
+  local diagnostics
+
+  if ! diagnostics="$("$repo_root/bin/maestro" diagnostics --json 2>/dev/null)"; then
+    fail "maestro diagnostics --json"
+    return
+  fi
+  pass "maestro diagnostics --json"
+
+  if jq -e '.screenCount > 0' >/dev/null <<< "$diagnostics"; then
+    pass "layout screen inventory"
+  else
+    fail "layout screen inventory unavailable"
+  fi
+
+  if jq -e '.accessibilityTrusted == true' >/dev/null <<< "$diagnostics"; then
+    pass "macOS Accessibility permission"
+  else
+    fail "macOS Accessibility permission missing for layout execution"
+  fi
+
+  if jq -e '.appleEventsAvailable == true' >/dev/null <<< "$diagnostics"; then
+    pass "Apple Events available"
+  else
+    fail "Apple Events unavailable"
+  fi
+
+  if jq -e '.iTerm.installed == true' >/dev/null <<< "$diagnostics"; then
+    pass "iTerm readiness"
+  else
+    fail "iTerm readiness"
+  fi
+}
+
 check_syntax() {
   local script_name
 
@@ -312,6 +346,7 @@ check_installed_links
 check_path_resolution
 check_dependencies
 check_iterm
+check_maestro_diagnostics
 check_syntax
 
 if (( failures > 0 )); then

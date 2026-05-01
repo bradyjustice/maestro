@@ -10,6 +10,9 @@ struct MaestroCoreChecks {
     try repoOpenPlanMatchesCompatibilityWindows()
     try workDevTargetSelectionMatchesCompatibility()
     try workDevPlanMatchesCompatibilityCommands()
+    try layoutPlanningCoversRepresentativeScreens()
+    try layoutPlanningReportsPermissionMissing()
+    try layoutPlannerFiltersUnmanagedWindows()
     try riskPolicyBlocksUnknownRiskyScripts()
     try discoveredRiskyScriptsStayBlockedUntilConfigured()
     try catalogValidationReportsFailures()
@@ -39,6 +42,7 @@ struct MaestroCoreChecks {
     ], "repo catalog order")
     try expect(catalog.actions.contains { $0.id == "repo.account.open" }, "account open action exists")
     try expect(catalog.actions.contains { $0.id == "bundle.node.cockpit.run" }, "node cockpit bundle action exists")
+    try expect(catalog.layouts.contains { $0.id == "terminal.six-up" }, "terminal six-up layout exists")
     try expect(catalog.validation.ok, "checked-in catalog validates")
   }
 
@@ -184,6 +188,74 @@ struct MaestroCoreChecks {
     try expectEqual(plan.focusCommand.arguments, ["switch-client", "-t", "node-dev"], "work dev tmux focus")
   }
 
+  private static func layoutPlanningCoversRepresentativeScreens() throws {
+    let layouts = [
+      terminalStackLayout(),
+      terminalQuadLayout(),
+      terminalSixUpLayout(),
+      codingWorkspaceLayout()
+    ]
+    let screens = [
+      testScreen(id: "laptop", width: 1512, height: 982),
+      testScreen(id: "external-16x9", width: 1920, height: 1080),
+      testScreen(id: "ultrawide", width: 3440, height: 1440),
+      testScreen(id: "tv", width: 3840, height: 2160)
+    ]
+    let windows = [
+      testWindow(id: "iterm-1", appName: "iTerm2", bundleIdentifier: "com.googlecode.iterm2", title: "One"),
+      testWindow(id: "iterm-2", appName: "iTerm2", bundleIdentifier: "com.googlecode.iterm2", title: "Two"),
+      testWindow(id: "iterm-3", appName: "iTerm2", bundleIdentifier: "com.googlecode.iterm2", title: "Three"),
+      testWindow(id: "iterm-4", appName: "iTerm2", bundleIdentifier: "com.googlecode.iterm2", title: "Four"),
+      testWindow(id: "iterm-5", appName: "iTerm2", bundleIdentifier: "com.googlecode.iterm2", title: "Five"),
+      testWindow(id: "iterm-6", appName: "iTerm2", bundleIdentifier: "com.googlecode.iterm2", title: "Six"),
+      testWindow(id: "code", appName: "Code", bundleIdentifier: "com.microsoft.VSCode", title: "Code"),
+      testWindow(id: "safari", appName: "Safari", bundleIdentifier: "com.apple.Safari", title: "Safari")
+    ]
+
+    for screen in screens {
+      for layout in layouts {
+        let plan = try LayoutPlanner().plan(layout: layout, screen: screen, windows: windows)
+        try expectEqual(plan.slots.count, layout.slots.count, "\(layout.id) slot count on \(screen.id)")
+        for slot in plan.slots {
+          try expect(slot.frame.width > 0, "\(layout.id) \(slot.slotID) width on \(screen.id)")
+          try expect(slot.frame.height > 0, "\(layout.id) \(slot.slotID) height on \(screen.id)")
+          try expect(screen.visibleFrame.contains(slot.frame), "\(layout.id) \(slot.slotID) stays inside \(screen.id)")
+        }
+      }
+    }
+  }
+
+  private static func layoutPlanningReportsPermissionMissing() throws {
+    let plan = try LayoutPlanner().plan(
+      layout: terminalQuadLayout(),
+      screen: testScreen(id: "main", width: 1920, height: 1080),
+      windows: [],
+      inventoryStatus: .accessibilityPermissionMissing
+    )
+
+    try expectEqual(plan.inventoryStatus, .accessibilityPermissionMissing, "layout permission inventory status")
+    try expect(plan.issues.contains { $0.code == "accessibility-permission-missing" }, "layout permission issue")
+    try expect(plan.slots.allSatisfy { $0.status == .missingWindow }, "layout slots stay inspectable without inventory")
+  }
+
+  private static func layoutPlannerFiltersUnmanagedWindows() throws {
+    let plan = try LayoutPlanner().plan(
+      layout: terminalStackLayout(),
+      screen: testScreen(id: "main", width: 1920, height: 1080),
+      windows: [
+        testWindow(id: "iterm-1", appName: "iTerm2", bundleIdentifier: "com.googlecode.iterm2", title: "One"),
+        testWindow(id: "iterm-2", appName: "iTerm2", bundleIdentifier: "com.googlecode.iterm2", title: "Two"),
+        testWindow(id: "iterm-3", appName: "iTerm2", bundleIdentifier: "com.googlecode.iterm2", title: "Three"),
+        testWindow(id: "safari", appName: "Safari", bundleIdentifier: "com.apple.Safari", title: "Safari")
+      ]
+    )
+
+    try expectEqual(plan.moveCount, 2, "terminal stack only targets two windows")
+    try expectEqual(plan.unmanagedWindowCount, 2, "unmanaged window count includes extra target and unrelated app")
+    try expectEqual(plan.unmanagedTargetWindows.map(\.id), ["iterm-3"], "only extra targeted app window is reported")
+    try expect(!plan.slots.contains { $0.window?.id == "safari" }, "unrelated app is not assigned to a terminal slot")
+  }
+
   private static func riskPolicyBlocksUnknownRiskyScripts() throws {
     let policy = RiskPolicy()
 
@@ -301,7 +373,8 @@ struct MaestroCoreChecks {
       description: "Test layout.",
       slots: [
         LayoutSlot(id: "slot", app: "iTerm", role: "terminal", unit: "left"),
-        LayoutSlot(id: "slot", app: "iTerm", role: "terminal", unit: "right")
+        LayoutSlot(id: "slot", app: "iTerm", role: "terminal", unit: "right"),
+        LayoutSlot(id: "bad-slot", app: "iTerm", role: "terminal", unit: "bogus")
       ]
     )
     let action = ActionDefinition(
@@ -358,6 +431,7 @@ struct MaestroCoreChecks {
     try expect(codes.contains("unknown_action_bundle"), "unknown action bundle reported")
     try expect(codes.contains("missing_action_repo"), "missing action repo reported")
     try expect(codes.contains("duplicate_layout_slot_id"), "duplicate layout slot reported")
+    try expect(codes.contains("unknown_layout_unit"), "unknown layout unit reported")
     try expect(codes.contains("duplicate_bundle_action_id"), "duplicate bundle action reported")
     try expect(codes.contains("unknown_bundle_action"), "unknown bundle action reported")
   }
@@ -399,6 +473,88 @@ struct MaestroCoreChecks {
       throw CheckFailure("missing \(message)")
     }
     return value
+  }
+
+  private static func terminalStackLayout() -> LayoutDefinition {
+    LayoutDefinition(
+      id: "terminal.stack",
+      label: "Terminal Stack",
+      description: "Stack terminals.",
+      slots: [
+        LayoutSlot(id: "top", app: "iTerm", role: "terminal", unit: "top-half"),
+        LayoutSlot(id: "bottom", app: "iTerm", role: "terminal", unit: "bottom-half")
+      ]
+    )
+  }
+
+  private static func terminalQuadLayout() -> LayoutDefinition {
+    LayoutDefinition(
+      id: "terminal.quad",
+      label: "Terminal Quad",
+      description: "Quad terminals.",
+      slots: [
+        LayoutSlot(id: "top-left", app: "iTerm", role: "terminal", unit: "top-left"),
+        LayoutSlot(id: "top-right", app: "iTerm", role: "terminal", unit: "top-right"),
+        LayoutSlot(id: "bottom-left", app: "iTerm", role: "terminal", unit: "bottom-left"),
+        LayoutSlot(id: "bottom-right", app: "iTerm", role: "terminal", unit: "bottom-right")
+      ]
+    )
+  }
+
+  private static func terminalSixUpLayout() -> LayoutDefinition {
+    LayoutDefinition(
+      id: "terminal.six-up",
+      label: "Terminal Six-Up",
+      description: "Six terminals.",
+      slots: [
+        LayoutSlot(id: "top-left", app: "iTerm", role: "terminal", unit: "top-left-third"),
+        LayoutSlot(id: "top-center", app: "iTerm", role: "terminal", unit: "top-center-third"),
+        LayoutSlot(id: "top-right", app: "iTerm", role: "terminal", unit: "top-right-third"),
+        LayoutSlot(id: "bottom-left", app: "iTerm", role: "terminal", unit: "bottom-left-third"),
+        LayoutSlot(id: "bottom-center", app: "iTerm", role: "terminal", unit: "bottom-center-third"),
+        LayoutSlot(id: "bottom-right", app: "iTerm", role: "terminal", unit: "bottom-right-third")
+      ]
+    )
+  }
+
+  private static func codingWorkspaceLayout() -> LayoutDefinition {
+    LayoutDefinition(
+      id: "coding.workspace",
+      label: "Coding Workspace",
+      description: "Coding workspace.",
+      slots: [
+        LayoutSlot(id: "editor", app: "Visual Studio Code", role: "editor", unit: "left-two-thirds"),
+        LayoutSlot(id: "terminal", app: "iTerm", role: "terminal", unit: "right-third"),
+        LayoutSlot(id: "browser", app: "Safari", role: "browser", unit: "center")
+      ]
+    )
+  }
+
+  private static func testScreen(id: String, width: Double, height: Double) -> LayoutScreen {
+    LayoutScreen(
+      id: id,
+      name: id,
+      frame: LayoutRect(x: 0, y: 0, width: width, height: height),
+      visibleFrame: LayoutRect(x: 0, y: 24, width: width, height: height - 48),
+      isMain: id == "main",
+      isActive: true
+    )
+  }
+
+  private static func testWindow(
+    id: String,
+    appName: String,
+    bundleIdentifier: String?,
+    title: String
+  ) -> WindowSnapshot {
+    WindowSnapshot(
+      id: id,
+      appName: appName,
+      bundleIdentifier: bundleIdentifier,
+      processIdentifier: 1,
+      title: title,
+      frame: LayoutRect(x: 0, y: 0, width: 100, height: 100)
+    )
   }
 }
 

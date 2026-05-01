@@ -210,6 +210,22 @@ public struct CatalogValidator: Sendable {
         label: "layout \(layout.id) slot",
         to: &errors
       )
+
+      if layout.slots.isEmpty {
+        errors.append(issue(
+          "layout_missing_slots",
+          "Layout \(layout.id) must define at least one slot."
+        ))
+      }
+
+      for slot in layout.slots {
+        if !LayoutGeometry.isKnownUnit(slot.unit) {
+          errors.append(issue(
+            "unknown_layout_unit",
+            "Layout \(layout.id) slot \(slot.id) uses unknown unit \(slot.unit)."
+          ))
+        }
+      }
     }
   }
 

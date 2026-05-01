@@ -41,6 +41,15 @@ if "$repo_root/bin/work" --help | grep -q '\.\./'; then
   exit 1
 fi
 
+symlink_bin="$tmp/symlink-bin"
+no_package_dir="$tmp/no-package"
+mkdir -p "$symlink_bin" "$no_package_dir"
+ln -s "$repo_root/bin/maestro" "$symlink_bin/maestro"
+ln -s "$repo_root/bin/work" "$symlink_bin/work"
+
+(cd "$no_package_dir" && "$symlink_bin/maestro" --help) >/dev/null
+(cd "$no_package_dir" && "$symlink_bin/work" --help) >/dev/null
+
 "$repo_root/bin/maestro" --help >/dev/null
 if [[ -x "$repo_root/.build/debug/maestro-core-checks" ]]; then
   "$repo_root/.build/debug/maestro-core-checks" >/dev/null
@@ -52,6 +61,8 @@ fi
 "$repo_root/bin/maestro" command list --json > "$tmp/maestro-commands.json"
 "$repo_root/bin/maestro" action list --json > "$tmp/maestro-actions.json"
 "$repo_root/bin/maestro" work dev all shell --dry-run --json > "$tmp/maestro-work-dev.json"
+"$repo_root/bin/maestro" layout list --json > "$tmp/maestro-layouts.json"
+"$repo_root/bin/maestro" layout plan terminal.quad --screen main --json > "$tmp/maestro-layout-plan.json"
 "$repo_root/bin/maestro" diagnostics --json > "$tmp/maestro-diagnostics.json"
 
 if ! grep -q '"key" : "account"' "$tmp/maestro-repos.json"; then
@@ -84,6 +95,18 @@ if ! grep -q '"session" : "node-dev"' "$tmp/maestro-work-dev.json" || ! grep -q 
   exit 1
 fi
 
+if ! grep -q '"id" : "terminal.six-up"' "$tmp/maestro-layouts.json"; then
+  printf 'Expected maestro layout list JSON to include terminal.six-up; saw:\n' >&2
+  cat "$tmp/maestro-layouts.json" >&2
+  exit 1
+fi
+
+if ! grep -q '"layoutID" : "terminal.quad"' "$tmp/maestro-layout-plan.json" || ! grep -q '"slotID" : "top-left-terminal"' "$tmp/maestro-layout-plan.json"; then
+  printf 'Expected maestro layout plan JSON to include terminal.quad geometry; saw:\n' >&2
+  cat "$tmp/maestro-layout-plan.json" >&2
+  exit 1
+fi
+
 if ! grep -q '"stateDirectory"' "$tmp/maestro-diagnostics.json"; then
   printf 'Expected maestro diagnostics JSON to include stateDirectory; saw:\n' >&2
   cat "$tmp/maestro-diagnostics.json" >&2
@@ -96,9 +119,16 @@ if ! grep -q '"validation"' "$tmp/maestro-diagnostics.json" || ! grep -q '"ok" :
   exit 1
 fi
 
+if ! grep -q '"layoutCount"' "$tmp/maestro-diagnostics.json" || ! grep -q '"iTerm"' "$tmp/maestro-diagnostics.json"; then
+  printf 'Expected maestro diagnostics JSON to include layout and iTerm readiness details; saw:\n' >&2
+  cat "$tmp/maestro-diagnostics.json" >&2
+  exit 1
+fi
+
 work_root="$tmp/work-node"
 repo_tmux_log="$tmp/work-repo-tmux.log"
 dev_tmux_log="$tmp/work-dev-tmux.log"
+symlink_tmux_log="$tmp/work-symlink-tmux.log"
 fake_bin="$tmp/bin"
 mkdir -p "$fake_bin"
 cat > "$fake_bin/tmux" <<'TMUX'
@@ -133,6 +163,13 @@ tmux() {
 }
 export -f tmux
 export tmux_log
+
+tmux_log="$symlink_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$symlink_bin/work" node >/dev/null
+if ! grep -q '^select-window -t node:coding1$' "$symlink_tmux_log"; then
+  printf 'Expected symlinked work node to select the first named window; saw:\n' >&2
+  cat "$symlink_tmux_log" >&2
+  exit 1
+fi
 
 tmux_log="$repo_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" node >/dev/null
 tmux_log="$repo_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/work" account >/dev/null

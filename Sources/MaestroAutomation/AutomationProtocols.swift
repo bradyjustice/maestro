@@ -4,11 +4,76 @@ import MaestroCore
 public struct AutomationPermissionSnapshot: Codable, Equatable, Sendable {
   public var accessibilityTrusted: Bool
   public var appleEventsAvailable: Bool
+  public var accessibilityState: PermissionRecoveryState
+  public var automationState: PermissionRecoveryState
+  public var accessibilityRecovery: PermissionRecovery
+  public var automationRecovery: PermissionRecovery
   public var notes: [String]
 
-  public init(accessibilityTrusted: Bool, appleEventsAvailable: Bool, notes: [String] = []) {
+  public init(
+    accessibilityTrusted: Bool,
+    appleEventsAvailable: Bool,
+    accessibilityState: PermissionRecoveryState? = nil,
+    automationState: PermissionRecoveryState? = nil,
+    accessibilityRecovery: PermissionRecovery? = nil,
+    automationRecovery: PermissionRecovery? = nil,
+    notes: [String] = []
+  ) {
     self.accessibilityTrusted = accessibilityTrusted
     self.appleEventsAvailable = appleEventsAvailable
+    self.accessibilityState = accessibilityState ?? (accessibilityTrusted ? .ready : .missing)
+    self.automationState = automationState ?? (appleEventsAvailable ? .ready : .unavailable)
+    self.accessibilityRecovery = accessibilityRecovery ?? PermissionRecovery(
+      title: accessibilityTrusted ? "Accessibility Ready" : "Accessibility Permission Required",
+      message: accessibilityTrusted ? "Maestro can inventory and place windows." : "Enable Accessibility for Maestro in System Settings before applying layouts.",
+      actionLabel: accessibilityTrusted ? nil : "Open Privacy & Security"
+    )
+    self.automationRecovery = automationRecovery ?? PermissionRecovery(
+      title: appleEventsAvailable ? "Automation Available" : "Automation Unavailable",
+      message: appleEventsAvailable ? "iTerm-specific Apple Events can be used when a layout requires them." : "Apple Events are unavailable in this environment.",
+      actionLabel: appleEventsAvailable ? nil : "Open Privacy & Security"
+    )
+    self.notes = notes
+  }
+}
+
+public enum PermissionRecoveryState: String, Codable, Equatable, Sendable {
+  case ready
+  case missing
+  case unavailable
+  case unknown
+}
+
+public struct PermissionRecovery: Codable, Equatable, Sendable {
+  public var title: String
+  public var message: String
+  public var actionLabel: String?
+
+  public init(title: String, message: String, actionLabel: String? = nil) {
+    self.title = title
+    self.message = message
+    self.actionLabel = actionLabel
+  }
+}
+
+public struct ItermReadinessSnapshot: Codable, Equatable, Sendable {
+  public var bundleIdentifier: String
+  public var installed: Bool
+  public var running: Bool
+  public var applicationPath: String?
+  public var notes: [String]
+
+  public init(
+    bundleIdentifier: String = "com.googlecode.iterm2",
+    installed: Bool,
+    running: Bool,
+    applicationPath: String? = nil,
+    notes: [String] = []
+  ) {
+    self.bundleIdentifier = bundleIdentifier
+    self.installed = installed
+    self.running = running
+    self.applicationPath = applicationPath
     self.notes = notes
   }
 }
@@ -19,6 +84,15 @@ public protocol AppAutomation {
 
 public protocol WindowAutomation {
   func permissionSnapshot(promptForAccessibility: Bool) -> AutomationPermissionSnapshot
+  func iTermReadiness() -> ItermReadinessSnapshot
+  func screens() -> [LayoutScreen]
+  func selectedScreen(_ selection: LayoutScreenSelection) throws -> LayoutScreen
+  func windowInventory() throws -> [WindowSnapshot]
+}
+
+public protocol LayoutAutomation {
+  func planLayout(_ layout: LayoutDefinition, screenSelection: LayoutScreenSelection) throws -> LayoutPlan
+  func applyLayout(_ plan: LayoutPlan) throws -> LayoutApplicationResult
 }
 
 public protocol CommandRunning {

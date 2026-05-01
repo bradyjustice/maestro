@@ -26,9 +26,15 @@ final class DashboardModel: ObservableObject {
   )
   @Published var selectedRepoID: String?
   @Published var selectedActionID: String?
+  @Published var selectedLayoutID: String?
+  @Published var selectedScreenSelection = LayoutScreenSelection.active
+  @Published var layoutPlan: LayoutPlan?
+  @Published var layoutPlanError: String?
+  @Published var layoutApplyMessage: String?
   @Published var loadError: String?
 
   private let pathResolver = RepoPathResolver()
+  private let automation = NativeMacAutomation()
 
   var selectedRepo: RepoDefinition? {
     repos.first { $0.id == selectedRepoID } ?? repos.first
@@ -36,6 +42,10 @@ final class DashboardModel: ObservableObject {
 
   var selectedAction: ActionDefinition? {
     actions.first { $0.id == selectedActionID } ?? actions.first
+  }
+
+  var selectedLayout: LayoutDefinition? {
+    layouts.first { $0.id == selectedLayoutID } ?? layouts.first
   }
 
   func load() {
@@ -48,7 +58,9 @@ final class DashboardModel: ObservableObject {
       bundles = catalog.bundles
       selectedRepoID = repos.first?.id
       selectedActionID = actions.first?.id
-      permissionSnapshot = NativeMacAutomation().permissionSnapshot(promptForAccessibility: false)
+      selectedLayoutID = layouts.first?.id
+      refreshPermissions(promptForAccessibility: false)
+      refreshLayoutPlan()
       loadError = nil
     } catch {
       repos = []
@@ -56,7 +68,54 @@ final class DashboardModel: ObservableObject {
       commands = []
       layouts = []
       bundles = []
+      layoutPlan = nil
       loadError = error.localizedDescription
+    }
+  }
+
+  func selectLayout(_ layout: LayoutDefinition) {
+    selectedLayoutID = layout.id
+    refreshLayoutPlan()
+  }
+
+  func refreshPermissions(promptForAccessibility: Bool = false) {
+    permissionSnapshot = automation.permissionSnapshot(promptForAccessibility: promptForAccessibility)
+  }
+
+  func refreshLayoutPlan() {
+    guard let layout = selectedLayout else {
+      layoutPlan = nil
+      layoutPlanError = nil
+      return
+    }
+
+    do {
+      layoutPlan = try automation.planLayout(layout, screenSelection: selectedScreenSelection)
+      layoutPlanError = nil
+    } catch {
+      layoutPlan = nil
+      layoutPlanError = error.localizedDescription
+    }
+  }
+
+  func applySelectedLayout() {
+    refreshPermissions(promptForAccessibility: false)
+    guard permissionSnapshot.accessibilityTrusted else {
+      layoutApplyMessage = permissionSnapshot.accessibilityRecovery.message
+      return
+    }
+    guard let layoutPlan else {
+      refreshLayoutPlan()
+      layoutApplyMessage = layoutPlanError
+      return
+    }
+
+    do {
+      let result = try automation.applyLayout(layoutPlan)
+      layoutApplyMessage = "Moved \(result.movedWindowCount) window(s), skipped \(result.skippedSlotCount) slot(s)."
+      refreshLayoutPlan()
+    } catch {
+      layoutApplyMessage = error.localizedDescription
     }
   }
 
@@ -97,7 +156,12 @@ struct Sidebar: View {
 
       Section("Layouts") {
         ForEach(model.layouts) { layout in
-          Label(layout.label, systemImage: "rectangle.3.group")
+          Button {
+            model.selectLayout(layout)
+          } label: {
+            Label(layout.label, systemImage: layout.id == model.selectedLayoutID ? "rectangle.3.group.fill" : "rectangle.3.group")
+          }
+          .buttonStyle(.plain)
         }
       }
 
@@ -137,16 +201,16 @@ struct Overview: View {
         ) {
           StatusCard(
             title: "Accessibility",
-            value: model.permissionSnapshot.accessibilityTrusted ? "Trusted" : "Needs Permission",
+            value: model.permissionSnapshot.accessibilityRecovery.title,
             systemImage: "accessibility",
-            detail: model.permissionSnapshot.accessibilityTrusted ? "Window inventory and placement are available." : "Window inventory and placement are paused.",
+            detail: model.permissionSnapshot.accessibilityRecovery.message,
             tone: model.permissionSnapshot.accessibilityTrusted ? .good : .warning
           )
           StatusCard(
             title: "Automation",
-            value: model.permissionSnapshot.appleEventsAvailable ? "Available" : "Unavailable",
+            value: model.permissionSnapshot.automationRecovery.title,
             systemImage: "applescript",
-            detail: "iTerm-specific automation can use Apple Events when required.",
+            detail: model.permissionSnapshot.automationRecovery.message,
             tone: model.permissionSnapshot.appleEventsAvailable ? .good : .warning
           )
           StatusCard(
@@ -157,6 +221,9 @@ struct Overview: View {
             tone: .neutral
           )
         }
+
+        SectionHeader(title: "Layouts", systemImage: "rectangle.3.group")
+        LayoutPlanPanel(model: model)
 
         SectionHeader(title: "Actions", systemImage: "bolt")
         ActionList(model: model)
@@ -244,9 +311,127 @@ struct DetailPane: View {
             DetailRow(label: "State", value: action.enabled ? "Enabled" : "Blocked")
           }
         }
+
+        if let layout = model.selectedLayout {
+          DetailSection(title: layout.label, systemImage: "rectangle.3.group") {
+            DetailRow(label: "ID", value: layout.id)
+            DetailRow(label: "Description", value: layout.description)
+            DetailRow(label: "Slots", value: "\(layout.slots.count)")
+            if let plan = model.layoutPlan {
+              DetailRow(label: "Screen", value: plan.screen.name)
+              DetailRow(label: "Targets", value: "\(plan.moveCount) matched, \(plan.slots.count - plan.moveCount) missing")
+            }
+          }
+        }
       }
       .padding(20)
     }
+  }
+}
+
+struct LayoutPlanPanel: View {
+  @ObservedObject var model: DashboardModel
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack(spacing: 10) {
+        Picker("Screen", selection: $model.selectedScreenSelection) {
+          Text("Active").tag(LayoutScreenSelection.active)
+          Text("Main").tag(LayoutScreenSelection.main)
+        }
+        .pickerStyle(.segmented)
+        .frame(width: 180)
+        .onChange(of: model.selectedScreenSelection) {
+          model.refreshLayoutPlan()
+        }
+
+        Button {
+          model.refreshLayoutPlan()
+        } label: {
+          Label("Refresh", systemImage: "arrow.clockwise")
+        }
+
+        Spacer()
+
+        if !model.permissionSnapshot.accessibilityTrusted {
+          Button {
+            model.refreshPermissions(promptForAccessibility: true)
+            model.refreshLayoutPlan()
+          } label: {
+            Label("Request Access", systemImage: "lock.open")
+          }
+        }
+
+        Button {
+          model.applySelectedLayout()
+        } label: {
+          Label("Apply Layout", systemImage: "rectangle.3.group")
+        }
+        .disabled(!model.permissionSnapshot.accessibilityTrusted || model.layoutPlan?.moveCount == 0)
+      }
+
+      if let error = model.layoutPlanError {
+        Text(error)
+          .font(.caption)
+          .foregroundStyle(.orange)
+      }
+
+      if let message = model.layoutApplyMessage {
+        Text(message)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+
+      if let plan = model.layoutPlan {
+        VStack(spacing: 0) {
+          ForEach(plan.slots, id: \.slotID) { slot in
+            LayoutSlotPlanRow(slot: slot)
+            Divider()
+          }
+        }
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+        if !plan.issues.isEmpty {
+          VStack(alignment: .leading, spacing: 4) {
+            ForEach(plan.issues, id: \.code) { issue in
+              Text(issue.message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+struct LayoutSlotPlanRow: View {
+  var slot: LayoutPlanSlot
+
+  var body: some View {
+    HStack(spacing: 12) {
+      Image(systemName: slot.status == .matched ? "checkmark.circle" : "circle.dashed")
+        .foregroundStyle(slot.status == .matched ? .green : .secondary)
+        .frame(width: 20)
+      VStack(alignment: .leading, spacing: 3) {
+        Text(slot.slotID)
+          .font(.body)
+        Text(frameText)
+          .font(.caption.monospaced())
+          .foregroundStyle(.secondary)
+      }
+      Spacer()
+      Text(slot.window?.appName ?? slot.app)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+    .padding(.horizontal, 12)
+    .padding(.vertical, 10)
+  }
+
+  private var frameText: String {
+    "\(slot.unit)  \(Int(slot.frame.x)),\(Int(slot.frame.y))  \(Int(slot.frame.width))x\(Int(slot.frame.height))"
   }
 }
 

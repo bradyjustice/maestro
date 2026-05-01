@@ -45,6 +45,8 @@ struct Command {
       try runActions(args)
     case "work":
       try runWork(args)
+    case "layout":
+      try runLayouts(args)
     case "diagnostics", "doctor":
       try runDiagnostics(args)
     default:
@@ -215,6 +217,95 @@ struct Command {
     }
   }
 
+  private func runLayouts(_ arguments: [String]) throws {
+    var args = arguments
+    let json = consumeFlag("--json", from: &args)
+
+    guard let subcommand = args.first else {
+      throw CLIError(message: "Missing layout subcommand.", code: "missing_layout_subcommand", exitCode: 2, json: json)
+    }
+    args.removeFirst()
+
+    switch subcommand {
+    case "list":
+      guard args.isEmpty else {
+        throw CLIError(message: "Unexpected layout list arguments: \(args.joined(separator: " "))", code: "unexpected_arguments", exitCode: 2, json: json)
+      }
+      let layouts = try loadCatalog().layouts
+      if json {
+        writeJSON(layouts)
+      } else {
+        for layout in layouts {
+          print("\(layout.id)\t\(layout.label)\t\(layout.slots.count) slots")
+        }
+      }
+    case "plan":
+      let screenSelection = try consumeScreenSelection(from: &args, json: json)
+      guard let layoutID = args.first else {
+        throw CLIError(message: "Missing layout id.", code: "missing_layout", exitCode: 2, json: json)
+      }
+      guard args.count == 1 else {
+        throw CLIError(message: "Unexpected layout plan arguments: \(args.dropFirst().joined(separator: " "))", code: "unexpected_arguments", exitCode: 2, json: json)
+      }
+      let layout = try findLayout(layoutID, json: json)
+      let automation = NativeMacAutomation()
+      let permissions = automation.permissionSnapshot(promptForAccessibility: false)
+      do {
+        let output = try LayoutPlanOutput(
+          plan: automation.planLayout(layout, screenSelection: screenSelection),
+          permissions: permissions,
+          iTerm: automation.iTermReadiness()
+        )
+        if json {
+          writeJSON(output)
+        } else {
+          printLayoutPlan(output.plan)
+        }
+      } catch let error as NativeMacAutomationError {
+        throw CLIError(message: error.localizedDescription, code: error.code, exitCode: 1, json: json)
+      } catch let error as LayoutPlanError {
+        throw CLIError(message: error.localizedDescription, code: error.code, exitCode: 1, json: json)
+      }
+    case "apply":
+      let screenSelection = try consumeScreenSelection(from: &args, json: json)
+      guard let layoutID = args.first else {
+        throw CLIError(message: "Missing layout id.", code: "missing_layout", exitCode: 2, json: json)
+      }
+      guard args.count == 1 else {
+        throw CLIError(message: "Unexpected layout apply arguments: \(args.dropFirst().joined(separator: " "))", code: "unexpected_arguments", exitCode: 2, json: json)
+      }
+
+      let layout = try findLayout(layoutID, json: json)
+      let automation = NativeMacAutomation()
+      let permissions = automation.permissionSnapshot(promptForAccessibility: false)
+      guard permissions.accessibilityTrusted else {
+        throw CLIError(
+          message: permissions.accessibilityRecovery.message,
+          code: "accessibility_permission_missing",
+          exitCode: 1,
+          json: json
+        )
+      }
+
+      do {
+        let plan = try automation.planLayout(layout, screenSelection: screenSelection)
+        let result = try automation.applyLayout(plan)
+        let output = LayoutApplyOutput(plan: plan, permissions: permissions, result: result)
+        if json {
+          writeJSON(output)
+        } else {
+          print("Applied \(layout.label): moved \(result.movedWindowCount) window(s), skipped \(result.skippedSlotCount) slot(s)")
+        }
+      } catch let error as NativeMacAutomationError {
+        throw CLIError(message: error.localizedDescription, code: error.code, exitCode: 1, json: json)
+      } catch let error as LayoutPlanError {
+        throw CLIError(message: error.localizedDescription, code: error.code, exitCode: 1, json: json)
+      }
+    default:
+      throw CLIError(message: "Unknown layout subcommand: \(subcommand)", code: "unknown_layout_subcommand", exitCode: 2, json: json)
+    }
+  }
+
   private func runDiagnostics(_ arguments: [String]) throws {
     var args = arguments
     let json = consumeFlag("--json", from: &args)
@@ -223,17 +314,27 @@ struct Command {
     }
 
     let catalog = try loadCatalog()
-    let automation = NativeMacAutomation().permissionSnapshot(promptForAccessibility: false)
+    let nativeAutomation = NativeMacAutomation()
+    let automation = nativeAutomation.permissionSnapshot(promptForAccessibility: false)
+    let screens = nativeAutomation.screens()
     let diagnostics = DiagnosticsReport(
       configDirectory: MaestroPaths.defaultConfigDirectory(environment: environment).path,
       stateDirectory: MaestroPaths.defaultStateDirectory(environment: environment).path,
       repoCount: catalog.repos.count,
       commandCount: catalog.commands.count,
       actionCount: catalog.actions.count,
+      layoutCount: catalog.layouts.count,
       validation: catalog.validation,
       accessibilityTrusted: automation.accessibilityTrusted,
       appleEventsAvailable: automation.appleEventsAvailable,
-      automationNotes: automation.notes
+      accessibilityState: automation.accessibilityState,
+      automationState: automation.automationState,
+      accessibilityRecovery: automation.accessibilityRecovery,
+      automationRecovery: automation.automationRecovery,
+      automationNotes: automation.notes,
+      screenCount: screens.count,
+      screens: screens,
+      iTerm: nativeAutomation.iTermReadiness()
     )
 
     if json {
@@ -244,8 +345,11 @@ struct Command {
       print("Repos: \(diagnostics.repoCount)")
       print("Commands: \(diagnostics.commandCount)")
       print("Actions: \(diagnostics.actionCount)")
+      print("Layouts: \(diagnostics.layoutCount)")
       print("Accessibility: \(diagnostics.accessibilityTrusted ? "trusted" : "not trusted")")
       print("Apple Events: \(diagnostics.appleEventsAvailable ? "available" : "unavailable")")
+      print("Screens: \(diagnostics.screenCount)")
+      print("iTerm: \(diagnostics.iTerm.installed ? "installed" : "missing")")
     }
   }
 
@@ -255,6 +359,14 @@ struct Command {
       pathResolver: RepoPathResolver(environment: environment)
     ).load()
   }
+
+  private func findLayout(_ layoutID: String, json: Bool) throws -> LayoutDefinition {
+    let catalog = try loadCatalog()
+    guard let layout = catalog.layouts.first(where: { $0.id == layoutID }) else {
+      throw CLIError(message: "Unknown layout: \(layoutID)", code: "unknown_layout", exitCode: 1, json: json)
+    }
+    return layout
+  }
 }
 
 struct DiagnosticsReport: Codable, Equatable {
@@ -263,10 +375,30 @@ struct DiagnosticsReport: Codable, Equatable {
   var repoCount: Int
   var commandCount: Int
   var actionCount: Int
+  var layoutCount: Int
   var validation: CatalogValidationReport
   var accessibilityTrusted: Bool
   var appleEventsAvailable: Bool
+  var accessibilityState: PermissionRecoveryState
+  var automationState: PermissionRecoveryState
+  var accessibilityRecovery: PermissionRecovery
+  var automationRecovery: PermissionRecovery
   var automationNotes: [String]
+  var screenCount: Int
+  var screens: [LayoutScreen]
+  var iTerm: ItermReadinessSnapshot
+}
+
+struct LayoutPlanOutput: Codable, Equatable {
+  var plan: LayoutPlan
+  var permissions: AutomationPermissionSnapshot
+  var iTerm: ItermReadinessSnapshot
+}
+
+struct LayoutApplyOutput: Codable, Equatable {
+  var plan: LayoutPlan
+  var permissions: AutomationPermissionSnapshot
+  var result: LayoutApplicationResult
 }
 
 struct CLIError: Error {
@@ -296,6 +428,26 @@ func consumeFlag(_ flag: String, from args: inout [String]) -> Bool {
   return true
 }
 
+func consumeScreenSelection(
+  from args: inout [String],
+  json: Bool
+) throws -> LayoutScreenSelection {
+  guard let index = args.firstIndex(of: "--screen") else {
+    return .active
+  }
+  let valueIndex = args.index(after: index)
+  guard valueIndex < args.endIndex else {
+    throw CLIError(message: "Missing value for --screen.", code: "missing_screen_selection", exitCode: 2, json: json)
+  }
+  let value = args[valueIndex]
+  guard let selection = LayoutScreenSelection(rawValue: value) else {
+    throw CLIError(message: "Unknown screen selection: \(value)", code: "unknown_screen_selection", exitCode: 2, json: json)
+  }
+  args.remove(at: valueIndex)
+  args.remove(at: index)
+  return selection
+}
+
 func writeJSON<T: Encodable>(_ value: T) {
   do {
     let data = try MaestroJSON.encoder.encode(value)
@@ -303,6 +455,20 @@ func writeJSON<T: Encodable>(_ value: T) {
     FileHandle.standardOutput.write(Data("\n".utf8))
   } catch {
     writeHumanError("Could not encode JSON output: \(error.localizedDescription)")
+  }
+}
+
+func printLayoutPlan(_ plan: LayoutPlan) {
+  print("\(plan.label) on \(plan.screen.name)")
+  for slot in plan.slots {
+    let frame = slot.frame
+    let target = slot.window.map { "\($0.appName): \($0.title)" } ?? "no matching window"
+    print("\(slot.slotID)\t\(slot.unit)\t\(Int(frame.x)),\(Int(frame.y)) \(Int(frame.width))x\(Int(frame.height))\t\(target)")
+  }
+  if !plan.issues.isEmpty {
+    for issue in plan.issues {
+      print("note: \(issue.message)")
+    }
   }
 }
 
@@ -319,6 +485,9 @@ func printHelp() {
       maestro command list [--repo <repo>] [--json]
       maestro action list [--json]
       maestro work dev <target...> [--json] [--dry-run]
+      maestro layout list [--json]
+      maestro layout plan <layout> [--screen active|main] [--json]
+      maestro layout apply <layout> [--screen active|main] [--json]
       maestro diagnostics [--json]
     """
   )

@@ -10,7 +10,13 @@
           "id": "primary-terminal",
           "app": "iTerm",
           "role": "terminal",
-          "unit": "right-half"
+          "unit": "top-half"
+        },
+        {
+          "id": "secondary-terminal",
+          "app": "iTerm",
+          "role": "terminal",
+          "unit": "bottom-half"
         }
       ]
     },
@@ -42,6 +48,49 @@
           "app": "iTerm",
           "role": "terminal",
           "unit": "bottom-right"
+        }
+      ]
+    },
+    {
+      "id": "terminal.six-up",
+      "label": "Terminal Six-Up",
+      "description": "Arrange six iTerm windows across a dense two-row terminal layout.",
+      "slots": [
+        {
+          "id": "top-left-terminal",
+          "app": "iTerm",
+          "role": "terminal",
+          "unit": "top-left-third"
+        },
+        {
+          "id": "top-center-terminal",
+          "app": "iTerm",
+          "role": "terminal",
+          "unit": "top-center-third"
+        },
+        {
+          "id": "top-right-terminal",
+          "app": "iTerm",
+          "role": "terminal",
+          "unit": "top-right-third"
+        },
+        {
+          "id": "bottom-left-terminal",
+          "app": "iTerm",
+          "role": "terminal",
+          "unit": "bottom-left-third"
+        },
+        {
+          "id": "bottom-center-terminal",
+          "app": "iTerm",
+          "role": "terminal",
+          "unit": "bottom-center-third"
+        },
+        {
+          "id": "bottom-right-terminal",
+          "app": "iTerm",
+          "role": "terminal",
+          "unit": "bottom-right-third"
         }
       ]
     },
