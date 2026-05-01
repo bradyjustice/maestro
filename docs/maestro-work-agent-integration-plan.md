@@ -16,7 +16,7 @@ canonical docs.
 
 ## Summary
 
-Maestro should become the long-term control plane for windows, tmux, `work`, agents, and repo commands. The shell scripts in `local-tools` stay during migration, but they become compatibility adapters over Maestro instead of separately owned behavior.
+Maestro should become the long-term control plane for windows, tmux, `work`, agents, and repo commands. The existing shell command names stay during migration, but they become compatibility adapters over Maestro instead of separately owned behavior.
 
 The core idea is a single Maestro action system: UI buttons, hotkeys, CLI calls, bundles, `work`, and `agent-*` all trigger the same registered actions.
 

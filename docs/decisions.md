@@ -168,7 +168,7 @@ preference for JSON where data-only definitions are sufficient.
 ### Hammerspoon Install Shape
 
 Default: Keep Hammerspoon config repo-owned and symlink or install it through
-local-tools, matching the existing local-tools install pattern.
+Maestro, matching the existing install pattern.
 
 ### First Bundle Set
 

@@ -1,0 +1,40 @@
+#!/bin/zsh
+set -euo pipefail
+
+osascript <<'APPLESCRIPT'
+set profileName to "Stack Left"
+
+set leftX to 0
+set topY to 0
+set cellWidth to 1280
+set cellHeight to 720
+
+set x1 to leftX
+set x2 to leftX + cellWidth
+set y1 to topY
+set y2 to topY + cellHeight
+set y3 to topY + (cellHeight * 2)
+
+tell application id "com.googlecode.iterm2"
+	set topWindow to (create window with profile profileName)
+	set bounds of topWindow to {x1, y1, x2, y2}
+	my tagWindow(topWindow, "top")
+
+	set bottomWindow to (create window with profile profileName)
+	set bounds of bottomWindow to {x1, y2, x2, y3}
+	my tagWindow(bottomWindow, "bottom")
+
+	activate
+end tell
+
+on tagWindow(targetWindow, slotName)
+	tell application id "com.googlecode.iterm2"
+		try
+			tell current session of targetWindow
+				set variable named "user.localToolsLayout" to "stack-left"
+				set variable named "user.localToolsSlot" to slotName
+			end tell
+		end try
+	end tell
+end tagWindow
+APPLESCRIPT

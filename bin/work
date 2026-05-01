@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+NODE_ROOT="${WORK_NODE_ROOT:-$HOME/Documents/Coding/node}"
+TOOLS_ROOT="${WORK_TOOLS_ROOT:-$HOME/Documents/Coding/maestro}"
+RESUME_ROOT="${WORK_RESUME_ROOT:-$HOME/Documents/Coding/resume}"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  work <repo>
+  work dev <target...>
+
+Repos:
+  node      node
+  account   node_account
+  admin     node_admin
+  plan      node_plan
+  board     node_board
+  website   node_website
+  email     node_email
+  tools     maestro
+  resume    resume
+  ux        node_ux
+
+Dev targets:
+  all       website + account + admin
+  website   node_website
+  account   node_account
+  admin     node_admin
+  shell     shell pane in node root
+USAGE
+}
+
+repo_dir() {
+  case "${1:-}" in
+    node) printf '%s\n' "$NODE_ROOT" ;;
+    account) printf '%s\n' "$NODE_ROOT/node_account" ;;
+    admin) printf '%s\n' "$NODE_ROOT/node_admin" ;;
+    plan) printf '%s\n' "$NODE_ROOT/node_plan" ;;
+    board) printf '%s\n' "$NODE_ROOT/node_board" ;;
+    website) printf '%s\n' "$NODE_ROOT/node_website" ;;
+    email) printf '%s\n' "$NODE_ROOT/node_email" ;;
+    tools) printf '%s\n' "$TOOLS_ROOT" ;;
+    resume) printf '%s\n' "$RESUME_ROOT" ;;
+    ux) printf '%s\n' "$NODE_ROOT/node_ux" ;;
+    *) return 1 ;;
+  esac
+}
+
+dev_target_dir() {
+  case "${1:-}" in
+    website) printf '%s\n' "$NODE_ROOT/node_website" ;;
+    account) printf '%s\n' "$NODE_ROOT/node_account" ;;
+    admin) printf '%s\n' "$NODE_ROOT/node_admin" ;;
+    shell) printf '%s\n' "$NODE_ROOT" ;;
+    *) return 1 ;;
+  esac
+}
+
+dev_targets_from_args() {
+  local arg
+  local want_website=0
+  local want_account=0
+  local want_admin=0
+  local want_shell=0
+
+  [[ $# -gt 0 ]] || return 1
+
+  for arg in "$@"; do
+    case "$arg" in
+      all)
+        want_website=1
+        want_account=1
+        want_admin=1
+        ;;
+      website) want_website=1 ;;
+      account) want_account=1 ;;
+      admin) want_admin=1 ;;
+      shell) want_shell=1 ;;
+      *) return 1 ;;
+    esac
+  done
+
+  if (( ! want_website && ! want_account && ! want_admin )); then
+    return 1
+  fi
+
+  DEV_TARGETS=()
+  (( want_website )) && DEV_TARGETS+=(website)
+  (( want_account )) && DEV_TARGETS+=(account)
+  (( want_admin )) && DEV_TARGETS+=(admin)
+  (( want_shell )) && DEV_TARGETS+=(shell)
+
+  return 0
+}
+
+create_windows() {
+  local session="$1"
+  local dir="$2"
+  shift 2
+
+  local first_window="$1"
+  shift
+
+  tmux new-session -d -s "$session" -n "$first_window" -c "$dir"
+
+  local window
+  for window in "$@"; do
+    tmux new-window -t "$session:" -n "$window" -c "$dir"
+  done
+
+  tmux select-window -t "$session:$first_window"
+}
+
+ensure_dir_exists() {
+  local label="$1"
+  local dir="$2"
+
+  if [[ ! -d "$dir" ]]; then
+    printf '%s directory does not exist: %s\n' "$label" "$dir" >&2
+    exit 1
+  fi
+}
+
+set_iterm_window_title() {
+  local title="$1"
+
+  if [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]]; then
+    printf '\033]0;%s\007' "$title"
+  fi
+}
+
+attach_or_switch() {
+  local session="$1"
+
+  if [[ -n "${TMUX:-}" ]]; then
+    tmux switch-client -t "$session"
+  else
+    tmux attach-session -t "$session"
+  fi
+}
+
+run_dev_mode() {
+  local session="node-dev"
+  set_iterm_window_title "work:node-dev"
+  local window="dev"
+  local first_target="${DEV_TARGETS[0]}"
+  local first_dir
+  local target
+  local dir
+  local pane_index=0
+
+  first_dir="$(dev_target_dir "$first_target")"
+  ensure_dir_exists "Dev target" "$first_dir"
+
+  if tmux has-session -t "$session" 2>/dev/null; then
+    tmux kill-session -t "$session"
+  fi
+
+  tmux new-session -d -s "$session" -n "$window" -c "$first_dir"
+  tmux set-window-option -t "$session:$window" remain-on-exit on
+
+  for target in "${DEV_TARGETS[@]}"; do
+    dir="$(dev_target_dir "$target")"
+    ensure_dir_exists "Dev target" "$dir"
+
+    if (( pane_index > 0 )); then
+      tmux split-window -t "$session:$window" -c "$dir"
+    fi
+
+    if [[ "$target" != "shell" ]]; then
+      tmux send-keys -t "$session:$window.$pane_index" "npm run dev" C-m
+    fi
+
+    ((pane_index += 1))
+  done
+
+  tmux select-layout -t "$session:$window" tiled
+  tmux select-pane -t "$session:$window.0"
+  attach_or_switch "$session"
+}
+
+main() {
+  if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
+    usage
+    exit 0
+  fi
+
+  if [[ "$1" == "dev" ]]; then
+    shift
+
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+      usage
+      exit 0
+    fi
+
+    if [[ $# -eq 0 ]]; then
+      printf 'Missing dev targets.\n\n' >&2
+      usage >&2
+      exit 1
+    fi
+
+    if ! dev_targets_from_args "$@"; then
+      printf 'Invalid dev targets.\n\n' >&2
+      usage >&2
+      exit 1
+    fi
+
+    run_dev_mode
+    exit 0
+  fi
+
+  if [[ $# -ne 1 ]]; then
+    usage
+    exit 0
+  fi
+
+  local repo="$1"
+  local dir
+
+  if ! dir="$(repo_dir "$repo")"; then
+    printf 'Unknown repo: %s\n\n' "$repo" >&2
+    usage >&2
+    exit 1
+  fi
+
+  if [[ ! -d "$dir" ]]; then
+    printf 'Repo directory does not exist: %s\n' "$dir" >&2
+    exit 1
+  fi
+
+  set_iterm_window_title "work:${repo}"
+  if ! tmux has-session -t "$repo" 2>/dev/null; then
+    local windows
+    case "$repo" in
+      tools|resume) windows=(Coding shell) ;;
+      *) windows=(coding1 coding2 dev shell) ;;
+    esac
+
+    create_windows "$repo" "$dir" "${windows[@]}"
+  fi
+
+  attach_or_switch "$repo"
+}
+
+main "$@"

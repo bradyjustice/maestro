@@ -50,7 +50,7 @@ Put this window in the top-left quadrant of the screen under my mouse.
 Keep your existing command-line and tmux workflow. Use Hammerspoon above it.
 
 ```text
-local-tools/
+maestro/
   work
   agent-start
   agent-status
@@ -575,10 +575,10 @@ Eventually, split the config into modules:
   screens.lua
 ```
 
-Or keep it inside your local tools repo:
+Or keep it inside your Maestro repo:
 
 ```text
-local-tools/
+maestro/
   hammerspoon/
     init.lua
     layouts.lua
@@ -592,7 +592,7 @@ local-tools/
 Then symlink:
 
 ```bash
-ln -s "$HOME/Documents/Coding/local-tools/hammerspoon" "$HOME/.hammerspoon"
+ln -s "$HOME/Documents/Coding/maestro/hammerspoon" "$HOME/.hammerspoon"
 ```
 
 Or have `install.sh` manage the symlink.

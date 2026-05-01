@@ -5,9 +5,9 @@ Status: Draft for acceptance.
 Source references:
 
 - `docs/maestro-work-agent-integration-plan.md`
-- `docs/hammerspoon-agentic-coding-window-management.md`
+- `docs/research/hammerspoon-agentic-coding-window-management.md`
 - Senior architecture review in project chat, May 1, 2026
-- Existing `bin/work`, `bin/agent-*`, and `bin/iterm-*` local-tools commands
+- Existing `bin/work`, `bin/agent-*`, and `bin/iterm-*` compatibility commands
 
 ## Summary
 

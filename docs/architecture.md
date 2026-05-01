@@ -6,7 +6,7 @@ Source references:
 
 - `docs/prd.md`
 - `docs/maestro-work-agent-integration-plan.md`
-- `docs/hammerspoon-agentic-coding-window-management.md`
+- `docs/research/hammerspoon-agentic-coding-window-management.md`
 - Existing `bin/work`, `bin/agent-*`, and `bin/iterm-*` scripts
 - Node Social Club package script conventions in sibling repos
 
