@@ -35,11 +35,12 @@ public struct ActionExecutionExecutor {
   }
 
   public func plan(actionID: String) throws -> ActionExecutionPlan {
-    try ActionExecutionPlanner(
+    let plan = try ActionExecutionPlanner(
       catalog: catalog,
       pathResolver: pathResolver,
       environment: environment
     ).plan(actionID: actionID)
+    return planWithRuntimeReadiness(plan)
   }
 
   public func run(actionID: String) throws -> ActionExecutionResult {
@@ -203,7 +204,7 @@ public struct ActionExecutionExecutor {
       }
       let plan = try layoutAutomation.planLayout(layout, screenSelection: screenSelection)
       let result = try layoutAutomation.applyLayout(plan)
-      return "Applied \(layout.label): moved \(result.movedWindowCount) window(s), skipped \(result.skippedSlotCount) slot(s)."
+      return layoutResultMessage(layoutLabel: layout.label, result: result)
     case .agent:
       throw ActionExecutionExecutorError.unsupportedAction(step.actionID)
     case .bundle:
@@ -223,6 +224,59 @@ public struct ActionExecutionExecutor {
       outcome: outcome,
       message: message
     )
+  }
+
+  private func planWithRuntimeReadiness(_ plan: ActionExecutionPlan) -> ActionExecutionPlan {
+    guard let readinessProvider = layoutAutomation as? any LayoutRuntimeReadinessProviding else {
+      return plan
+    }
+
+    var steps = plan.steps
+    for index in steps.indices where steps[index].type == .layout {
+      guard let layoutID = steps[index].layoutID,
+            let layout = catalog.layouts.first(where: { $0.id == layoutID }) else {
+        continue
+      }
+
+      let readiness = readinessProvider.layoutReadiness(
+        for: layout,
+        promptForAccessibility: false
+      )
+      guard !readiness.ready else {
+        continue
+      }
+
+      steps[index].runnable = false
+      steps[index].blockedReason = readiness.blockedReasons.isEmpty
+        ? "Native layout automation is unavailable."
+        : readiness.blockedReasons.joined(separator: " ")
+    }
+
+    let blockedReasons: [String]
+    if steps.isEmpty {
+      blockedReasons = plan.blockedReasons
+    } else {
+      blockedReasons = steps.compactMap { step in
+        step.blockedReason.map { "\(step.label): \($0)" }
+      }
+    }
+
+    return ActionExecutionPlan(
+      schemaVersion: plan.schemaVersion,
+      actionID: plan.actionID,
+      label: plan.label,
+      type: plan.type,
+      runnable: !steps.isEmpty && steps.allSatisfy(\.runnable),
+      blockedReasons: blockedReasons,
+      steps: steps
+    )
+  }
+
+  private func layoutResultMessage(
+    layoutLabel: String,
+    result: LayoutApplicationResult
+  ) -> String {
+    "Applied \(layoutLabel): created \(result.createdWindowCount) window(s), moved \(result.movedWindowCount) window(s), skipped \(result.skippedSlotCount) slot(s)."
   }
 
   private func appendAudit(

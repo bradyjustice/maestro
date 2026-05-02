@@ -63,6 +63,8 @@ fi
 "$repo_root/bin/maestro" action run bundle.node.cockpit.run --dry-run --json > "$tmp/maestro-node-bundle-plan.json"
 "$repo_root/bin/maestro" action run bundle.backend.cockpit.run --dry-run --json > "$tmp/maestro-backend-bundle-plan.json"
 "$repo_root/bin/maestro" action run bundle.frontend.cockpit.run --dry-run --json > "$tmp/maestro-frontend-bundle-plan.json"
+"$repo_root/bin/maestro" action run layout.terminal.stack.apply --dry-run --json > "$tmp/maestro-layout-action-plan.json"
+"$repo_root/bin/maestro" action run agent.status.show --dry-run --json > "$tmp/maestro-blocked-action-plan.json"
 "$repo_root/bin/maestro" work dev all shell --dry-run --json > "$tmp/maestro-work-dev.json"
 "$repo_root/bin/maestro" layout list --json > "$tmp/maestro-layouts.json"
 "$repo_root/bin/maestro" layout plan terminal.quad --screen main --json > "$tmp/maestro-layout-plan.json"
@@ -107,6 +109,18 @@ fi
 if ! grep -q '"actionID" : "command.website.dev.run"' "$tmp/maestro-frontend-bundle-plan.json" || ! grep -q '"displayCommand" : "npm run dev"' "$tmp/maestro-frontend-bundle-plan.json"; then
   printf 'Expected frontend cockpit dry-run JSON to include website dev command; saw:\n' >&2
   cat "$tmp/maestro-frontend-bundle-plan.json" >&2
+  exit 1
+fi
+
+if ! grep -q '"actionID" : "layout.terminal.stack.apply"' "$tmp/maestro-layout-action-plan.json" || ! grep -q '"type" : "layout"' "$tmp/maestro-layout-action-plan.json"; then
+  printf 'Expected layout action dry-run JSON to include terminal stack layout action; saw:\n' >&2
+  cat "$tmp/maestro-layout-action-plan.json" >&2
+  exit 1
+fi
+
+if ! grep -q '"runnable" : false' "$tmp/maestro-blocked-action-plan.json" || ! grep -q 'Agent action execution is not supported' "$tmp/maestro-blocked-action-plan.json"; then
+  printf 'Expected blocked action dry-run JSON to include a readable blocked state; saw:\n' >&2
+  cat "$tmp/maestro-blocked-action-plan.json" >&2
   exit 1
 fi
 

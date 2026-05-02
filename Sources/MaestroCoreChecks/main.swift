@@ -1,4 +1,5 @@
 import Foundation
+import MaestroAutomation
 import MaestroCore
 
 @main
@@ -13,6 +14,10 @@ struct MaestroCoreChecks {
     try layoutPlanningCoversRepresentativeScreens()
     try layoutPlanningReportsPermissionMissing()
     try layoutPlannerFiltersUnmanagedWindows()
+    try itermResolverFallsBackToKnownBundlePath()
+    try itermProvisioningTargetsOnlyMissingTerminalSlots()
+    try actionExecutionRuntimeBlocksLayoutWhenAutomationUnavailable()
+    try actionExecutionReportsCreatedLayoutWindows()
     try riskPolicyBlocksUnknownRiskyScripts()
     try discoveredRiskyScriptsStayBlockedUntilConfigured()
     try actionExecutionExpandsBundlesDeterministically()
@@ -253,6 +258,131 @@ struct MaestroCoreChecks {
     try expectEqual(plan.unmanagedWindowCount, 2, "unmanaged window count includes extra target and unrelated app")
     try expectEqual(plan.unmanagedTargetWindows.map(\.id), ["iterm-3"], "only extra targeted app window is reported")
     try expect(!plan.slots.contains { $0.window?.id == "safari" }, "unrelated app is not assigned to a terminal slot")
+  }
+
+  private static func itermResolverFallsBackToKnownBundlePath() throws {
+    let tempRoot = FileManager.default.temporaryDirectory
+      .appendingPathComponent("maestro-core-checks-\(UUID().uuidString)")
+    defer {
+      try? FileManager.default.removeItem(at: tempRoot)
+    }
+
+    let appURL = tempRoot.appendingPathComponent("iTerm.app")
+    let contentsURL = appURL.appendingPathComponent("Contents")
+    try FileManager.default.createDirectory(at: contentsURL, withIntermediateDirectories: true)
+    let plist = """
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+      <key>CFBundleIdentifier</key>
+      <string>com.googlecode.iterm2</string>
+    </dict>
+    </plist>
+    """
+    try plist.write(to: contentsURL.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+
+    let resolution = ItermApplicationResolver(
+      knownBundlePaths: [appURL.path],
+      homeDirectory: tempRoot.path
+    ).resolve(launchServicesURL: nil)
+
+    try expect(resolution.installed, "iTerm fallback resolver finds known bundle path")
+    try expect(!resolution.launchServicesReady, "iTerm fallback resolver keeps Launch Services status separate")
+    try expect(resolution.knownBundlePathFound, "iTerm fallback resolver reports known path")
+    try expectEqual(resolution.applicationURL?.path, appURL.path, "iTerm fallback application path")
+  }
+
+  private static func itermProvisioningTargetsOnlyMissingTerminalSlots() throws {
+    let plan = try LayoutPlanner().plan(
+      layout: codingWorkspaceLayout(),
+      screen: testScreen(id: "main", width: 1920, height: 1080),
+      windows: [
+        testWindow(id: "code", appName: "Code", bundleIdentifier: "com.microsoft.VSCode", title: "Code")
+      ]
+    )
+
+    let missingItermSlots = ItermWindowProvisioning.missingItermSlots(in: plan)
+
+    try expectEqual(missingItermSlots.map(\.slotID), ["terminal"], "only missing iTerm slots are provisioned")
+    try expect(plan.canExecute, "layout with missing iTerm slot is executable when inventory is available")
+  }
+
+  private static func actionExecutionRuntimeBlocksLayoutWhenAutomationUnavailable() throws {
+    let layout = terminalStackLayout()
+    let action = ActionDefinition(
+      id: "layout.terminal.stack.apply",
+      label: "Terminal Stack",
+      description: "Apply terminal stack.",
+      type: .layout,
+      layoutID: layout.id
+    )
+    let catalog = catalogWith(layout: layout, action: action)
+    let fakeAutomation = FakeLayoutAutomation(
+      readiness: LayoutRuntimeReadinessSnapshot(
+        ready: false,
+        accessibilityTrusted: false,
+        appleEventsAvailable: true,
+        iTermInstalled: true,
+        iTermWindowCreationAvailable: true,
+        blockedReasons: ["Accessibility missing."]
+      )
+    )
+
+    let plan = try ActionExecutionExecutor(
+      catalog: catalog,
+      layoutAutomation: fakeAutomation,
+      auditLog: ActionAuditLog(stateDirectory: FileManager.default.temporaryDirectory)
+    ).plan(actionID: action.id)
+
+    try expect(!plan.runnable, "runtime layout readiness blocks action plans")
+    try expectEqual(plan.steps.first?.blockedReason, "Accessibility missing.", "runtime blocked reason")
+    try expect(plan.blockedReasons.contains { $0.contains("Accessibility missing.") }, "runtime blocked reason is visible at plan level")
+  }
+
+  private static func actionExecutionReportsCreatedLayoutWindows() throws {
+    let tempRoot = FileManager.default.temporaryDirectory
+      .appendingPathComponent("maestro-core-checks-\(UUID().uuidString)")
+    defer {
+      try? FileManager.default.removeItem(at: tempRoot)
+    }
+
+    let layout = terminalStackLayout()
+    let action = ActionDefinition(
+      id: "layout.terminal.stack.apply",
+      label: "Terminal Stack",
+      description: "Apply terminal stack.",
+      type: .layout,
+      layoutID: layout.id
+    )
+    let catalog = catalogWith(layout: layout, action: action)
+    let fakeAutomation = FakeLayoutAutomation(
+      readiness: LayoutRuntimeReadinessSnapshot(
+        ready: true,
+        accessibilityTrusted: true,
+        appleEventsAvailable: true,
+        iTermInstalled: true,
+        iTermWindowCreationAvailable: true
+      ),
+      result: LayoutApplicationResult(
+        ok: true,
+        layoutID: layout.id,
+        movedWindowCount: 2,
+        createdWindowCount: 2,
+        skippedSlotCount: 0
+      )
+    )
+
+    let result = try ActionExecutionExecutor(
+      catalog: catalog,
+      layoutAutomation: fakeAutomation,
+      auditLog: ActionAuditLog(stateDirectory: tempRoot)
+    ).run(actionID: action.id)
+
+    let step = try require(result.steps.first, "layout execution step result")
+    try expect(result.ok, "layout execution with created windows succeeds")
+    try expect(step.message.contains("created 2 window(s)"), "layout execution reports created window count")
+    try expect(step.message.contains("moved 2 window(s)"), "layout execution reports moved window count")
   }
 
   private static func riskPolicyBlocksUnknownRiskyScripts() throws {
@@ -565,6 +695,21 @@ struct MaestroCoreChecks {
     ).load()
   }
 
+  private static func catalogWith(
+    layout: LayoutDefinition,
+    action: ActionDefinition
+  ) -> CatalogBundle {
+    CatalogBundle(
+      repos: [],
+      configuredCommands: [],
+      commands: [],
+      configuredActions: [action],
+      actions: [action],
+      layouts: [layout],
+      bundles: []
+    )
+  }
+
   private static func expect(_ condition: Bool, _ message: String) throws {
     guard condition else {
       throw CheckFailure(message)
@@ -664,6 +809,53 @@ struct MaestroCoreChecks {
       title: title,
       frame: LayoutRect(x: 0, y: 0, width: 100, height: 100)
     )
+  }
+}
+
+private struct FakeLayoutAutomation: LayoutAutomation, LayoutRuntimeReadinessProviding {
+  var readiness: LayoutRuntimeReadinessSnapshot
+  var result: LayoutApplicationResult
+
+  init(
+    readiness: LayoutRuntimeReadinessSnapshot,
+    result: LayoutApplicationResult = LayoutApplicationResult(
+      ok: true,
+      layoutID: "terminal.stack",
+      movedWindowCount: 0,
+      skippedSlotCount: 0
+    )
+  ) {
+    self.readiness = readiness
+    self.result = result
+  }
+
+  func planLayout(
+    _ layout: LayoutDefinition,
+    screenSelection: LayoutScreenSelection
+  ) throws -> LayoutPlan {
+    try LayoutPlanner().plan(
+      layout: layout,
+      screen: LayoutScreen(
+        id: "fake",
+        name: "Fake",
+        frame: LayoutRect(x: 0, y: 0, width: 1920, height: 1080),
+        visibleFrame: LayoutRect(x: 0, y: 24, width: 1920, height: 1032),
+        isMain: true,
+        isActive: true
+      ),
+      windows: []
+    )
+  }
+
+  func applyLayout(_ plan: LayoutPlan) throws -> LayoutApplicationResult {
+    result
+  }
+
+  func layoutReadiness(
+    for layout: LayoutDefinition,
+    promptForAccessibility: Bool
+  ) -> LayoutRuntimeReadinessSnapshot {
+    readiness
   }
 }
 

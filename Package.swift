@@ -30,7 +30,7 @@ let package = Package(
     ),
     .executableTarget(
       name: "MaestroCoreChecks",
-      dependencies: ["MaestroCore"]
+      dependencies: ["MaestroCore", "MaestroAutomation"]
     )
   ]
 )

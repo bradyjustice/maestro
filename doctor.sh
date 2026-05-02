@@ -295,6 +295,20 @@ check_maestro_diagnostics() {
     fail "layout screen inventory unavailable"
   fi
 
+  if jq -e '.iTerm.installed == true' >/dev/null <<< "$diagnostics"; then
+    pass "iTerm app presence"
+  else
+    fail "iTerm app missing"
+  fi
+
+  if jq -e '.iTerm.launchServicesReady == true' >/dev/null <<< "$diagnostics"; then
+    pass "iTerm Launch Services readiness"
+  elif jq -e '.iTerm.installed == true' >/dev/null <<< "$diagnostics"; then
+    pass "iTerm Launch Services fallback"
+  else
+    fail "iTerm Launch Services readiness"
+  fi
+
   if jq -e '.accessibilityTrusted == true' >/dev/null <<< "$diagnostics"; then
     pass "macOS Accessibility permission"
   else
@@ -307,10 +321,10 @@ check_maestro_diagnostics() {
     fail "Apple Events unavailable"
   fi
 
-  if jq -e '.iTerm.installed == true' >/dev/null <<< "$diagnostics"; then
-    pass "iTerm readiness"
+  if jq -e '.nativeLayoutReadiness.ready == true' >/dev/null <<< "$diagnostics"; then
+    pass "native layout readiness"
   else
-    fail "iTerm readiness"
+    fail "native layout readiness"
   fi
 }
 

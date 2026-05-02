@@ -77,6 +77,10 @@ final class DashboardModel: ObservableObject {
     accessibilityTrusted: false,
     appleEventsAvailable: false
   )
+  @Published var iTermReadiness = ItermReadinessSnapshot(
+    installed: false,
+    running: false
+  )
   @Published var selectedRepoID: String?
   @Published var selectedActionID: String?
   @Published var selectedLayoutID: String?
@@ -170,11 +174,34 @@ final class DashboardModel: ObservableObject {
     guard let catalog else {
       return nil
     }
-    return try? ActionExecutionPlanner(
+    return try? ActionExecutionExecutor(
       catalog: catalog,
+      environment: environment,
       pathResolver: pathResolver,
-      environment: environment
+      layoutAutomation: automation,
+      screenSelection: selectedScreenSelection
     ).plan(actionID: action.id)
+  }
+
+  func layoutAvailability(for layout: LayoutDefinition) -> DashboardActionAvailability {
+    let readiness = automation.layoutReadiness(for: layout, promptForAccessibility: false)
+    guard readiness.ready else {
+      return DashboardActionAvailability(
+        canRun: false,
+        reason: readiness.blockedReasons.first ?? "Native layout automation is unavailable."
+      )
+    }
+
+    guard let plan = layout.id == selectedLayoutID ? layoutPlan : try? automation.planLayout(layout, screenSelection: selectedScreenSelection) else {
+      return DashboardActionAvailability(canRun: false, reason: layoutPlanError ?? "Unable to plan this layout.")
+    }
+    guard plan.canExecute else {
+      return DashboardActionAvailability(
+        canRun: false,
+        reason: "No matching windows can be moved and no missing iTerm windows can be created for this layout."
+      )
+    }
+    return .runnable
   }
 
   func actionAvailability(for action: ActionDefinition) -> DashboardActionAvailability {
@@ -210,7 +237,7 @@ final class DashboardModel: ObservableObject {
       guard let layout = layout(for: action) else {
         return "Select and apply the configured layout."
       }
-      return "Select \(layout.label), plan it for the current screen choice, and apply matched windows."
+      return "Select \(layout.label), create missing iTerm windows when needed, and apply matched windows."
     case .commandRun:
       return "Run the command if it is safe, local, modeled with argv, and uses a supported tmux behavior."
     case .agent:
@@ -272,6 +299,7 @@ final class DashboardModel: ObservableObject {
 
   func refreshPermissions(promptForAccessibility: Bool = false) {
     permissionSnapshot = automation.permissionSnapshot(promptForAccessibility: promptForAccessibility)
+    iTermReadiness = automation.iTermReadiness()
   }
 
   func refreshLayoutPlan() {
@@ -363,17 +391,23 @@ final class DashboardModel: ObservableObject {
   private func applyLayout(_ layout: LayoutDefinition) throws -> String {
     selectedLayoutID = layout.id
     refreshPermissions(promptForAccessibility: false)
-    guard permissionSnapshot.accessibilityTrusted else {
-      throw DashboardActionError.unavailable(permissionSnapshot.accessibilityRecovery.message)
+    let readiness = automation.layoutReadiness(for: layout, promptForAccessibility: false)
+    guard readiness.ready else {
+      throw DashboardActionError.unavailable(
+        readiness.blockedReasons.first ?? "Native layout automation is unavailable."
+      )
     }
 
     refreshLayoutPlan()
     guard let layoutPlan else {
       throw DashboardActionError.unavailable(layoutPlanError ?? "Unable to plan layout.")
     }
+    guard layoutPlan.canExecute else {
+      throw DashboardActionError.unavailable("No matching windows can be moved and no missing iTerm windows can be created for this layout.")
+    }
 
     let result = try automation.applyLayout(layoutPlan)
-    let message = "Applied \(layout.label): moved \(result.movedWindowCount) window(s), skipped \(result.skippedSlotCount) slot(s)."
+    let message = "Applied \(layout.label): created \(result.createdWindowCount) window(s), moved \(result.movedWindowCount) window(s), skipped \(result.skippedSlotCount) slot(s)."
     layoutApplyMessage = message
     refreshLayoutPlan()
     return message
@@ -470,6 +504,7 @@ struct Overview: View {
           columns: [
             GridItem(.flexible(), spacing: 12),
             GridItem(.flexible(), spacing: 12),
+            GridItem(.flexible(), spacing: 12),
             GridItem(.flexible(), spacing: 12)
           ],
           spacing: 12
@@ -487,6 +522,13 @@ struct Overview: View {
             systemImage: "applescript",
             detail: model.permissionSnapshot.automationRecovery.message,
             tone: model.permissionSnapshot.appleEventsAvailable ? .good : .warning
+          )
+          StatusCard(
+            title: "iTerm",
+            value: model.iTermReadiness.installed ? "Installed" : "Missing",
+            systemImage: "macwindow",
+            detail: model.iTermReadiness.notes.first ?? (model.iTermReadiness.launchServicesReady ? "Launch Services can resolve iTerm." : "Found app fallback is required."),
+            tone: model.iTermReadiness.installed ? .good : .warning
           )
           StatusCard(
             title: "Catalog",
@@ -863,6 +905,13 @@ struct ActionExecutionStepRow: View {
 struct LayoutPlanPanel: View {
   @ObservedObject var model: DashboardModel
 
+  private var availability: DashboardActionAvailability {
+    guard let layout = model.selectedLayout else {
+      return DashboardActionAvailability(canRun: false, reason: "No layout is selected.")
+    }
+    return model.layoutAvailability(for: layout)
+  }
+
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
       HStack(spacing: 10) {
@@ -898,13 +947,20 @@ struct LayoutPlanPanel: View {
         } label: {
           Label("Apply Layout", systemImage: "rectangle.3.group")
         }
-        .disabled(!model.permissionSnapshot.accessibilityTrusted || model.layoutPlan?.moveCount == 0)
+        .disabled(!availability.canRun)
+        .help(availability.canRun ? "Apply layout" : availability.reason)
       }
 
       if let error = model.layoutPlanError {
         Text(error)
           .font(.caption)
           .foregroundStyle(.orange)
+      }
+
+      if !availability.canRun {
+        Text(availability.reason)
+          .font(.caption)
+          .foregroundStyle(.secondary)
       }
 
       if let message = model.layoutApplyMessage {

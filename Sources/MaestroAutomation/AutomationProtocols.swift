@@ -174,7 +174,7 @@ public struct ItermApplicationResolver {
     if path == "~" {
       return homeDirectory
     }
-    return homeDirectory + "/" + path.dropFirst(2)
+    return homeDirectory + "/" + String(path.dropFirst(2))
   }
 }
 

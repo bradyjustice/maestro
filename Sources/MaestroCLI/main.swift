@@ -317,10 +317,14 @@ struct Command {
       let layout = try findLayout(layoutID, json: json)
       let automation = NativeMacAutomation()
       let permissions = automation.permissionSnapshot(promptForAccessibility: false)
-      guard permissions.accessibilityTrusted else {
+      let readiness = automation.layoutReadiness(for: layout, promptForAccessibility: false)
+      guard readiness.ready else {
+        let message = readiness.blockedReasons.isEmpty
+          ? "Native layout automation is unavailable."
+          : readiness.blockedReasons.joined(separator: " ")
         throw CLIError(
-          message: permissions.accessibilityRecovery.message,
-          code: "accessibility_permission_missing",
+          message: message,
+          code: readiness.accessibilityTrusted ? "layout_runtime_unavailable" : "accessibility_permission_missing",
           exitCode: 1,
           json: json
         )
@@ -333,7 +337,7 @@ struct Command {
         if json {
           writeJSON(output)
         } else {
-          print("Applied \(layout.label): moved \(result.movedWindowCount) window(s), skipped \(result.skippedSlotCount) slot(s)")
+          print("Applied \(layout.label): created \(result.createdWindowCount) window(s), moved \(result.movedWindowCount) window(s), skipped \(result.skippedSlotCount) slot(s)")
         }
       } catch let error as NativeMacAutomationError {
         throw CLIError(message: error.localizedDescription, code: error.code, exitCode: 1, json: json)
@@ -356,6 +360,16 @@ struct Command {
     let nativeAutomation = NativeMacAutomation()
     let automation = nativeAutomation.permissionSnapshot(promptForAccessibility: false)
     let screens = nativeAutomation.screens()
+    let nativeLayoutReadiness = catalog.layouts.first(where: ItermWindowProvisioning.layoutUsesIterm).map {
+      nativeAutomation.layoutReadiness(for: $0, promptForAccessibility: false)
+    } ?? LayoutRuntimeReadinessSnapshot(
+      ready: automation.accessibilityTrusted,
+      accessibilityTrusted: automation.accessibilityTrusted,
+      appleEventsAvailable: automation.appleEventsAvailable,
+      iTermInstalled: true,
+      iTermWindowCreationAvailable: true,
+      blockedReasons: automation.accessibilityTrusted ? [] : [automation.accessibilityRecovery.message]
+    )
     let diagnostics = DiagnosticsReport(
       configDirectory: MaestroPaths.defaultConfigDirectory(environment: environment).path,
       stateDirectory: MaestroPaths.defaultStateDirectory(environment: environment).path,
@@ -371,6 +385,7 @@ struct Command {
       accessibilityRecovery: automation.accessibilityRecovery,
       automationRecovery: automation.automationRecovery,
       automationNotes: automation.notes,
+      nativeLayoutReadiness: nativeLayoutReadiness,
       screenCount: screens.count,
       screens: screens,
       iTerm: nativeAutomation.iTermReadiness()
@@ -389,6 +404,8 @@ struct Command {
       print("Apple Events: \(diagnostics.appleEventsAvailable ? "available" : "unavailable")")
       print("Screens: \(diagnostics.screenCount)")
       print("iTerm: \(diagnostics.iTerm.installed ? "installed" : "missing")")
+      print("Launch Services: \(diagnostics.iTerm.launchServicesReady ? "ready" : "missing iTerm registration")")
+      print("Native Layouts: \(diagnostics.nativeLayoutReadiness.ready ? "ready" : "blocked")")
     }
   }
 
@@ -423,6 +440,7 @@ struct DiagnosticsReport: Codable, Equatable {
   var accessibilityRecovery: PermissionRecovery
   var automationRecovery: PermissionRecovery
   var automationNotes: [String]
+  var nativeLayoutReadiness: LayoutRuntimeReadinessSnapshot
   var screenCount: Int
   var screens: [LayoutScreen]
   var iTerm: ItermReadinessSnapshot
