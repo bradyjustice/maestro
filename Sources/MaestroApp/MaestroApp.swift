@@ -2,6 +2,59 @@ import MaestroAutomation
 import MaestroCore
 import SwiftUI
 
+struct DashboardActionAvailability: Equatable {
+  var canRun: Bool
+  var reason: String
+
+  static let runnable = DashboardActionAvailability(canRun: true, reason: "")
+}
+
+enum DashboardActionStatus: Equatable {
+  case running(String)
+  case succeeded(String)
+  case failed(String)
+
+  var message: String {
+    switch self {
+    case let .running(message), let .succeeded(message), let .failed(message):
+      return message
+    }
+  }
+
+  var systemImage: String {
+    switch self {
+    case .running:
+      return "hourglass"
+    case .succeeded:
+      return "checkmark.circle.fill"
+    case .failed:
+      return "exclamationmark.triangle.fill"
+    }
+  }
+
+  var foreground: Color {
+    switch self {
+    case .running:
+      return .secondary
+    case .succeeded:
+      return .green
+    case .failed:
+      return .orange
+    }
+  }
+}
+
+enum DashboardActionError: Error, LocalizedError {
+  case unavailable(String)
+
+  var errorDescription: String? {
+    switch self {
+    case let .unavailable(message):
+      return message
+    }
+  }
+}
+
 @main
 struct MaestroNativeApp: App {
   var body: some Scene {
@@ -31,9 +84,12 @@ final class DashboardModel: ObservableObject {
   @Published var layoutPlan: LayoutPlan?
   @Published var layoutPlanError: String?
   @Published var layoutApplyMessage: String?
+  @Published var actionStatuses: [String: DashboardActionStatus] = [:]
+  @Published var runningActionID: String?
   @Published var loadError: String?
 
   private let pathResolver = RepoPathResolver()
+  private let environment = ProcessInfo.processInfo.environment
   private let automation = NativeMacAutomation()
 
   var selectedRepo: RepoDefinition? {
@@ -78,6 +134,117 @@ final class DashboardModel: ObservableObject {
     refreshLayoutPlan()
   }
 
+  func repo(for action: ActionDefinition) -> RepoDefinition? {
+    guard let repoKey = action.repoKey else {
+      return nil
+    }
+    return repos.first { $0.key == repoKey }
+  }
+
+  func command(for action: ActionDefinition) -> CommandDefinition? {
+    guard let commandID = action.commandID else {
+      return nil
+    }
+    return commands.first { $0.id == commandID }
+  }
+
+  func layout(for action: ActionDefinition) -> LayoutDefinition? {
+    guard let layoutID = action.layoutID else {
+      return nil
+    }
+    return layouts.first { $0.id == layoutID }
+  }
+
+  func bundle(for action: ActionDefinition) -> BundleDefinition? {
+    guard let bundleID = action.bundleID else {
+      return nil
+    }
+    return bundles.first { $0.id == bundleID }
+  }
+
+  func actionAvailability(for action: ActionDefinition) -> DashboardActionAvailability {
+    guard action.enabled else {
+      return DashboardActionAvailability(
+        canRun: false,
+        reason: "This action is blocked by catalog policy."
+      )
+    }
+
+    switch action.type {
+    case .repoOpen:
+      guard action.repoKey != nil else {
+        return DashboardActionAvailability(canRun: false, reason: "No repo target is configured for this action.")
+      }
+      guard repo(for: action) != nil else {
+        return DashboardActionAvailability(canRun: false, reason: "The configured repo target is not in the catalog.")
+      }
+      return .runnable
+    case .layout:
+      guard action.layoutID != nil else {
+        return DashboardActionAvailability(canRun: false, reason: "No layout target is configured for this action.")
+      }
+      guard layout(for: action) != nil else {
+        return DashboardActionAvailability(canRun: false, reason: "The configured layout target is not in the catalog.")
+      }
+      return .runnable
+    case .commandRun:
+      return DashboardActionAvailability(
+        canRun: false,
+        reason: "Command actions are visible for review; dashboard execution is not enabled yet."
+      )
+    case .agent:
+      return DashboardActionAvailability(
+        canRun: false,
+        reason: "Agent actions are visible for status; dashboard execution is not enabled yet."
+      )
+    case .bundle:
+      return DashboardActionAvailability(
+        canRun: false,
+        reason: "Bundle actions are visible for planning; dashboard execution waits for confirmation support."
+      )
+    }
+  }
+
+  func expectedBehavior(for action: ActionDefinition) -> String {
+    switch action.type {
+    case .repoOpen:
+      guard let repo = repo(for: action) else {
+        return "Open or focus the configured repo tmux workspace."
+      }
+      return "Open or focus tmux session \(repo.tmuxSession), creating \(repo.defaultWindows.joined(separator: ", ")) if needed."
+    case .layout:
+      guard let layout = layout(for: action) else {
+        return "Select and apply the configured layout."
+      }
+      return "Select \(layout.label), plan it for the current screen choice, and apply matched windows."
+    case .commandRun:
+      return "Show the command target without running it from the dashboard."
+    case .agent:
+      return "Show the agent action without starting native agent work."
+    case .bundle:
+      return "Show the bundle contents without running bundled actions."
+    }
+  }
+
+  func runAction(_ action: ActionDefinition) {
+    selectedActionID = action.id
+
+    let availability = actionAvailability(for: action)
+    guard availability.canRun else {
+      actionStatuses[action.id] = .failed(availability.reason)
+      return
+    }
+
+    switch action.type {
+    case .repoOpen:
+      runRepoOpenAction(action)
+    case .layout:
+      runLayoutAction(action)
+    case .commandRun, .agent, .bundle:
+      actionStatuses[action.id] = .failed(actionAvailability(for: action).reason)
+    }
+  }
+
   func refreshPermissions(promptForAccessibility: Bool = false) {
     permissionSnapshot = automation.permissionSnapshot(promptForAccessibility: promptForAccessibility)
   }
@@ -99,24 +266,92 @@ final class DashboardModel: ObservableObject {
   }
 
   func applySelectedLayout() {
-    refreshPermissions(promptForAccessibility: false)
-    guard permissionSnapshot.accessibilityTrusted else {
-      layoutApplyMessage = permissionSnapshot.accessibilityRecovery.message
-      return
-    }
-    guard let layoutPlan else {
-      refreshLayoutPlan()
-      layoutApplyMessage = layoutPlanError
+    guard let layout = selectedLayout else {
+      layoutApplyMessage = "No layout is selected."
       return
     }
 
     do {
-      let result = try automation.applyLayout(layoutPlan)
-      layoutApplyMessage = "Moved \(result.movedWindowCount) window(s), skipped \(result.skippedSlotCount) slot(s)."
-      refreshLayoutPlan()
+      layoutApplyMessage = try applyLayout(layout)
     } catch {
       layoutApplyMessage = error.localizedDescription
     }
+  }
+
+  private func runRepoOpenAction(_ action: ActionDefinition) {
+    guard let repo = repo(for: action) else {
+      actionStatuses[action.id] = .failed("The configured repo target is not in the catalog.")
+      return
+    }
+
+    let resolvedPath = pathResolver.resolve(repo.path)
+    let plan = RepoOpenPlan(
+      repo: repo,
+      resolvedPath: resolvedPath,
+      inTmux: environment["TMUX"]?.isEmpty == false
+    )
+    let executorEnvironment = environment
+
+    runningActionID = action.id
+    actionStatuses[action.id] = .running("Opening \(repo.label)...")
+
+    Task {
+      let result = await Task.detached(priority: .userInitiated) { () -> (success: Bool, message: String) in
+        do {
+          try RepoOpenExecutor(environment: executorEnvironment).open(plan)
+          return (true, "Opened \(repo.label) in tmux session \(repo.tmuxSession).")
+        } catch {
+          return (false, error.localizedDescription)
+        }
+      }.value
+
+      if result.success {
+        actionStatuses[action.id] = .succeeded(result.message)
+      } else {
+        actionStatuses[action.id] = .failed(result.message)
+      }
+      runningActionID = nil
+    }
+  }
+
+  private func runLayoutAction(_ action: ActionDefinition) {
+    guard let layout = layout(for: action) else {
+      actionStatuses[action.id] = .failed("The configured layout target is not in the catalog.")
+      return
+    }
+
+    selectedLayoutID = layout.id
+    runningActionID = action.id
+    actionStatuses[action.id] = .running("Applying \(layout.label)...")
+
+    do {
+      let message = try applyLayout(layout)
+      actionStatuses[action.id] = .succeeded(message)
+    } catch {
+      let message = error.localizedDescription
+      layoutApplyMessage = message
+      actionStatuses[action.id] = .failed(message)
+    }
+    runningActionID = nil
+  }
+
+  private func applyLayout(_ layout: LayoutDefinition) throws -> String {
+    selectedLayoutID = layout.id
+    refreshPermissions(promptForAccessibility: false)
+    guard permissionSnapshot.accessibilityTrusted else {
+      throw DashboardActionError.unavailable(permissionSnapshot.accessibilityRecovery.message)
+    }
+
+    refreshLayoutPlan()
+    guard let layoutPlan else {
+      throw DashboardActionError.unavailable(layoutPlanError ?? "Unable to plan layout.")
+    }
+
+    let result = try automation.applyLayout(layoutPlan)
+    let message = "Applied \(layout.label): moved \(result.movedWindowCount) window(s), skipped \(result.skippedSlotCount) slot(s)."
+    layoutApplyMessage = message
+    refreshLayoutPlan()
+    return message
   }
 
   func resolvedPath(for repo: RepoDefinition) -> String {
@@ -241,7 +476,26 @@ struct ActionList: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      ForEach(model.actions.prefix(12)) { action in
+      ForEach(model.actions) { action in
+        ActionRow(model: model, action: action)
+      }
+    }
+    .background(Color(nsColor: .controlBackgroundColor))
+    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+  }
+}
+
+struct ActionRow: View {
+  @ObservedObject var model: DashboardModel
+  var action: ActionDefinition
+
+  private var availability: DashboardActionAvailability {
+    model.actionAvailability(for: action)
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      HStack(spacing: 12) {
         Button {
           model.selectedActionID = action.id
         } label: {
@@ -260,14 +514,51 @@ struct ActionList: View {
             RiskBadge(risk: action.risk, enabled: action.enabled)
           }
           .contentShape(Rectangle())
-          .padding(.vertical, 10)
         }
         .buttonStyle(.plain)
-        Divider()
+
+        actionStateIcon
+
+        Button {
+          model.runAction(action)
+        } label: {
+          Label(model.runningActionID == action.id ? "Running" : "Run", systemImage: "play.fill")
+        }
+        .controlSize(.small)
+        .disabled(!availability.canRun || model.runningActionID != nil)
+        .help(availability.canRun ? "Run action" : availability.reason)
       }
+      .padding(.horizontal, 12)
+      .padding(.vertical, 10)
+      .background(action.id == model.selectedActionID ? Color.accentColor.opacity(0.10) : Color.clear)
+
+      if let status = model.actionStatuses[action.id] {
+        ActionStatusLine(status: status)
+          .padding(.horizontal, 46)
+          .padding(.bottom, 10)
+      } else if !availability.canRun {
+        Text(availability.reason)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .padding(.horizontal, 46)
+          .padding(.bottom, 10)
+      }
+
+      Divider()
     }
-    .background(Color(nsColor: .controlBackgroundColor))
-    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+  }
+
+  @ViewBuilder
+  private var actionStateIcon: some View {
+    if model.runningActionID == action.id {
+      ProgressView()
+        .controlSize(.small)
+        .frame(width: 20)
+    } else if let status = model.actionStatuses[action.id] {
+      Image(systemName: status.systemImage)
+        .foregroundStyle(status.foreground)
+        .frame(width: 20)
+    }
   }
 
   private func icon(for type: ActionType) -> String {
@@ -283,6 +574,17 @@ struct ActionList: View {
     case .bundle:
       return "square.stack.3d.up"
     }
+  }
+}
+
+struct ActionStatusLine: View {
+  var status: DashboardActionStatus
+
+  var body: some View {
+    Label(status.message, systemImage: status.systemImage)
+      .font(.caption)
+      .foregroundStyle(status.foreground)
+      .fixedSize(horizontal: false, vertical: true)
   }
 }
 
@@ -304,11 +606,7 @@ struct DetailPane: View {
 
         if let action = model.selectedAction {
           DetailSection(title: action.label, systemImage: "bolt") {
-            DetailRow(label: "ID", value: action.id)
-            DetailRow(label: "Type", value: action.type.rawValue)
-            DetailRow(label: "Risk", value: action.risk.rawValue)
-            DetailRow(label: "Confirmation", value: action.confirmation.rawValue)
-            DetailRow(label: "State", value: action.enabled ? "Enabled" : "Blocked")
+            ActionDetail(model: model, action: action)
           }
         }
 
@@ -325,6 +623,95 @@ struct DetailPane: View {
         }
       }
       .padding(20)
+    }
+  }
+}
+
+struct ActionDetail: View {
+  @ObservedObject var model: DashboardModel
+  var action: ActionDefinition
+
+  private var availability: DashboardActionAvailability {
+    model.actionAvailability(for: action)
+  }
+
+  var body: some View {
+    DetailRow(label: "ID", value: action.id)
+    DetailRow(label: "Type", value: action.type.rawValue)
+    DetailRow(label: "Risk", value: action.risk.rawValue)
+    DetailRow(label: "Confirm", value: action.confirmation.rawValue)
+    DetailRow(label: "State", value: action.enabled ? "Enabled" : "Blocked")
+
+    Divider()
+
+    targetRows
+    DetailRow(label: "Expected", value: model.expectedBehavior(for: action))
+
+    if !availability.canRun {
+      DetailRow(label: "Disabled", value: availability.reason)
+    }
+
+    HStack {
+      Button {
+        model.runAction(action)
+      } label: {
+        Label(model.runningActionID == action.id ? "Running" : "Run Action", systemImage: "play.fill")
+      }
+      .disabled(!availability.canRun || model.runningActionID != nil)
+
+      if model.runningActionID == action.id {
+        ProgressView()
+          .controlSize(.small)
+      }
+
+      Spacer()
+    }
+    .padding(.top, 4)
+
+    if let status = model.actionStatuses[action.id] {
+      ActionStatusLine(status: status)
+    }
+  }
+
+  @ViewBuilder
+  private var targetRows: some View {
+    switch action.type {
+    case .repoOpen:
+      if let repo = model.repo(for: action) {
+        DetailRow(label: "Target", value: repo.label)
+        DetailRow(label: "Path", value: model.resolvedPath(for: repo))
+        DetailRow(label: "tmux", value: repo.tmuxSession)
+        DetailRow(label: "Windows", value: repo.defaultWindows.joined(separator: ", "))
+      } else {
+        DetailRow(label: "Target", value: action.repoKey ?? "Missing repo")
+      }
+    case .layout:
+      if let layout = model.layout(for: action) {
+        DetailRow(label: "Target", value: layout.label)
+        DetailRow(label: "Layout", value: layout.id)
+        DetailRow(label: "Slots", value: "\(layout.slots.count)")
+      } else {
+        DetailRow(label: "Target", value: action.layoutID ?? "Missing layout")
+      }
+    case .commandRun:
+      if let command = model.command(for: action) {
+        DetailRow(label: "Target", value: command.label)
+        DetailRow(label: "Command", value: command.id)
+        DetailRow(label: "Repo", value: command.repoKey ?? "None")
+        DetailRow(label: "Behavior", value: command.behavior.rawValue)
+      } else {
+        DetailRow(label: "Target", value: action.commandID ?? "Missing command")
+      }
+    case .agent:
+      DetailRow(label: "Target", value: action.commandID ?? action.role?.rawValue ?? "Agent")
+    case .bundle:
+      if let bundle = model.bundle(for: action) {
+        DetailRow(label: "Target", value: bundle.label)
+        DetailRow(label: "Bundle", value: bundle.id)
+        DetailRow(label: "Actions", value: bundle.actionIDs.joined(separator: ", "))
+      } else {
+        DetailRow(label: "Target", value: action.bundleID ?? "Missing bundle")
+      }
     }
   }
 }
