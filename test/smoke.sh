@@ -31,8 +31,26 @@ AGENT_START_NO_LAUNCH=1 \
 task_id="sample-$(date '+%Y%m%d')-smoke-test"
 
 AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/agent-status" >/dev/null
+MAESTRO_STATE_DIR="$tmp/maestro-state" AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/maestro" agent status --json > "$tmp/maestro-agent-status.json"
+if ! grep -q "\"id\" : \"$task_id\"" "$tmp/maestro-agent-status.json" || ! grep -q '"source" : "legacy"' "$tmp/maestro-agent-status.json"; then
+  printf 'Expected maestro agent status JSON to include the legacy task; saw:\n' >&2
+  cat "$tmp/maestro-agent-status.json" >&2
+  exit 1
+fi
+if grep -q 'Smoke prompt' "$tmp/maestro-agent-status.json" || grep -q '"prompt"' "$tmp/maestro-agent-status.json"; then
+  printf 'Expected maestro agent status JSON to omit legacy prompts; saw:\n' >&2
+  cat "$tmp/maestro-agent-status.json" >&2
+  exit 1
+fi
+
 AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/agent-mark" "$task_id" abandoned "Smoke complete" >/dev/null
 printf 'y\n' | AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/agent-clean" "$task_id" >/dev/null
+MAESTRO_STATE_DIR="$tmp/maestro-state" AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/maestro" agent show "$task_id" --json > "$tmp/maestro-agent-show.json"
+if ! grep -q "\"id\" : \"$task_id\"" "$tmp/maestro-agent-show.json" || ! grep -q '"archived" : true' "$tmp/maestro-agent-show.json"; then
+  printf 'Expected maestro agent show JSON to include the archived legacy task; saw:\n' >&2
+  cat "$tmp/maestro-agent-show.json" >&2
+  exit 1
+fi
 
 "$repo_root/bin/work" --help >/dev/null
 if "$repo_root/bin/work" --help | grep -q '\.\./'; then

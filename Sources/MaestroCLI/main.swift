@@ -47,6 +47,8 @@ struct Command {
       try runWork(args)
     case "layout":
       try runLayouts(args)
+    case "agent":
+      try runAgents(args)
     case "diagnostics", "doctor":
       try runDiagnostics(args)
     default:
@@ -409,6 +411,53 @@ struct Command {
     }
   }
 
+  private func runAgents(_ arguments: [String]) throws {
+    var args = arguments
+    let json = consumeFlag("--json", from: &args)
+
+    guard let subcommand = args.first else {
+      throw CLIError(message: "Missing agent subcommand.", code: "missing_agent_subcommand", exitCode: 2, json: json)
+    }
+    args.removeFirst()
+
+    let store = AgentStateStore(
+      stateDirectory: MaestroPaths.defaultStateDirectory(environment: environment),
+      environment: environment
+    )
+
+    do {
+      switch subcommand {
+      case "status":
+        guard args.isEmpty else {
+          throw CLIError(message: "Unexpected agent status arguments: \(args.joined(separator: " "))", code: "unexpected_arguments", exitCode: 2, json: json)
+        }
+        let tasks = try store.list(includeArchived: false)
+        if json {
+          writeJSON(AgentTaskList(stateDirectory: store.stateDirectory.path, tasks: tasks))
+        } else {
+          printAgentStatus(tasks, stateDirectory: store.stateDirectory.path)
+        }
+      case "show":
+        guard let query = args.first else {
+          throw CLIError(message: "Missing agent task id.", code: "missing_agent_task", exitCode: 2, json: json)
+        }
+        guard args.count == 1 else {
+          throw CLIError(message: "Unexpected agent show arguments: \(args.dropFirst().joined(separator: " "))", code: "unexpected_arguments", exitCode: 2, json: json)
+        }
+        let task = try store.task(matching: query, includeArchived: true)
+        if json {
+          writeJSON(task)
+        } else {
+          printAgentTask(task)
+        }
+      default:
+        throw CLIError(message: "Unknown agent subcommand: \(subcommand)", code: "unknown_agent_subcommand", exitCode: 2, json: json)
+      }
+    } catch let error as AgentStateStoreError {
+      throw CLIError(message: error.localizedDescription, code: "agent_state_error", exitCode: 1, json: json)
+    }
+  }
+
   private func loadCatalog() throws -> CatalogBundle {
     try CatalogLoader(
       configDirectory: MaestroPaths.defaultConfigDirectory(environment: environment),
@@ -546,6 +595,8 @@ func printHelp() {
       maestro layout list [--json]
       maestro layout plan <layout> [--screen active|main] [--json]
       maestro layout apply <layout> [--screen active|main] [--json]
+      maestro agent status [--json]
+      maestro agent show <task-id> [--json]
       maestro diagnostics [--json]
     """
   )
@@ -596,5 +647,107 @@ func printActionPlan(_ plan: ActionExecutionPlan) {
     for reason in plan.blockedReasons {
       print("blocked: \(reason)")
     }
+  }
+}
+
+func printAgentStatus(_ tasks: [AgentTaskSnapshot], stateDirectory: String) {
+  guard !tasks.isEmpty else {
+    print("No active agent tasks.")
+    print("State: \(stateDirectory)")
+    return
+  }
+
+  print(agentStatusLine(task: "TASK", state: "STATE", repo: "REPO", branch: "BRANCH", review: "REVIEW", source: "SOURCE", worktree: "WORKTREE"))
+  print(agentStatusLine(task: "----", state: "-----", repo: "----", branch: "------", review: "------", source: "------", worktree: "--------"))
+  for task in tasks {
+    let record = task.record
+    print(agentStatusLine(
+      task: trunc(record.id, width: 36),
+      state: trunc(record.state.rawValue, width: 12),
+      repo: trunc(record.repoName, width: 16),
+      branch: trunc(record.branch, width: 28),
+      review: task.reviewArtifactAvailable ? "yes" : "no",
+      source: task.source.rawValue,
+      worktree: record.worktreePath
+    ))
+  }
+}
+
+func printAgentTask(_ task: AgentTaskSnapshot) {
+  let record = task.record
+  print("Task: \(record.id)")
+  print("Source: \(task.source.rawValue)\(task.archived ? " archived" : "")")
+  print("State: \(record.state.rawValue)")
+  print("Repo: \(record.repoName)")
+  print("Repo path: \(record.repoPath)")
+  print("Branch: \(record.branch)")
+  print("Base: \(record.baseRef)")
+  print("Worktree: \(record.worktreePath)")
+  if let tmuxSession = record.tmuxSession, !tmuxSession.isEmpty {
+    print("tmux session: \(tmuxSession)")
+  }
+  if let tmuxWindow = record.tmuxWindow, !tmuxWindow.isEmpty {
+    print("tmux window: \(tmuxWindow)")
+  }
+  print("Created: \(MaestroJSONDateFormatter.string(from: record.createdAt))")
+  print("Updated: \(MaestroJSONDateFormatter.string(from: record.updatedAt))")
+  if let cleanedAt = record.cleanedAt {
+    print("Cleaned: \(MaestroJSONDateFormatter.string(from: cleanedAt))")
+  }
+  if let note = record.note, !note.isEmpty {
+    print("Note: \(note)")
+  }
+  if let checkExit = record.checkExit {
+    print("Check exit: \(checkExit)")
+  }
+  if let reviewExit = record.reviewExit {
+    print("Review exit: \(reviewExit)")
+  }
+  if let reviewArtifact = record.reviewArtifact, !reviewArtifact.isEmpty {
+    print("Review artifact: \(task.reviewArtifactAvailable ? reviewArtifact : "\(reviewArtifact) (missing)")")
+  } else {
+    print("Review artifact: none")
+  }
+  print("Record: \(task.recordPath)")
+}
+
+func trunc(_ value: String, width: Int) -> String {
+  guard value.count > width else {
+    return value
+  }
+  return String(value.prefix(max(0, width - 1))) + "~"
+}
+
+func padded(_ value: String, width: Int) -> String {
+  let clipped = trunc(value, width: width)
+  guard clipped.count < width else {
+    return clipped
+  }
+  return clipped + String(repeating: " ", count: width - clipped.count)
+}
+
+func agentStatusLine(
+  task: String,
+  state: String,
+  repo: String,
+  branch: String,
+  review: String,
+  source: String,
+  worktree: String
+) -> String {
+  [
+    padded(task, width: 36),
+    padded(state, width: 12),
+    padded(repo, width: 16),
+    padded(branch, width: 28),
+    padded(review, width: 8),
+    padded(source, width: 8),
+    worktree
+  ].joined(separator: " ")
+}
+
+enum MaestroJSONDateFormatter {
+  static func string(from date: Date) -> String {
+    ISO8601DateFormatter().string(from: date)
   }
 }

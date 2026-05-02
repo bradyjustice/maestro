@@ -8,6 +8,11 @@ struct MaestroCoreChecks {
     try checkedInCatalogLoads()
     try repoPathResolverPreservesCurrentWorkOverrides()
     try stateDirectoryResolutionMatchesCompatibilityRules()
+    try agentStateStorePathsResolveCompatibilityLocations()
+    try agentTaskRecordJSONRoundTripsAndValidatesState()
+    try legacyAgentEnvRecordsNormalizeWithoutPrompts()
+    try agentStateStoreWritesPrivateAtomicRecords()
+    try invalidLegacyAgentStateFailsValidation()
     try repoOpenPlanMatchesCompatibilityWindows()
     try workDevTargetSelectionMatchesCompatibility()
     try workDevPlanMatchesCompatibilityCommands()
@@ -86,6 +91,213 @@ struct MaestroCoreChecks {
       "/Users/example/.local/state/local-tools/maestro",
       "fallback state directory"
     )
+  }
+
+  private static func agentStateStorePathsResolveCompatibilityLocations() throws {
+    let stateDirectory = URL(fileURLWithPath: "/tmp/maestro-state")
+    let explicitRegistry = AgentStateStore(
+      stateDirectory: stateDirectory,
+      environment: [
+        "HOME": "/Users/example",
+        "AGENT_REGISTRY_DIR": "~/agent-registry"
+      ]
+    )
+    try expectEqual(
+      explicitRegistry.activeDirectory.path,
+      "/tmp/maestro-state/agents/active",
+      "swift active agent state directory"
+    )
+    try expectEqual(
+      explicitRegistry.archiveDirectory.path,
+      "/tmp/maestro-state/agents/archive",
+      "swift archived agent state directory"
+    )
+    try expectEqual(
+      explicitRegistry.legacyRegistryDirectory.path,
+      "/Users/example/agent-registry",
+      "explicit legacy registry directory"
+    )
+
+    let worktreeRegistry = AgentStateStore(
+      stateDirectory: stateDirectory,
+      environment: [
+        "HOME": "/Users/example",
+        "AGENT_WORKTREE_ROOT": "~/worktrees"
+      ]
+    )
+    try expectEqual(
+      worktreeRegistry.legacyRegistryDirectory.path,
+      "/Users/example/worktrees/_registry",
+      "legacy registry from worktree root"
+    )
+
+    let defaultRegistry = AgentStateStore(
+      stateDirectory: stateDirectory,
+      environment: ["HOME": "/Users/example"]
+    )
+    try expectEqual(
+      defaultRegistry.legacyRegistryDirectory.path,
+      "/Users/example/Documents/Coding/node/_agent-worktrees/_registry",
+      "default legacy registry directory"
+    )
+  }
+
+  private static func agentTaskRecordJSONRoundTripsAndValidatesState() throws {
+    let record = sampleAgentRecord(state: .needsInput)
+    let data = try MaestroJSON.encoder.encode(record)
+    let decoded = try MaestroJSON.decoder.decode(AgentTaskRecord.self, from: data)
+    try expectEqual(decoded, record, "agent task record round-trip")
+
+    guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+      throw CheckFailure("agent task record did not encode as an object")
+    }
+    try expectEqual(object["schemaVersion"] as? Int, 1, "agent schema version")
+    try expectEqual(object["state"] as? String, "needs-input", "agent lifecycle state encoding")
+    try expect(object["prompt"] == nil, "agent records do not encode prompts")
+
+    let invalid = Data(
+      """
+      {
+        "schemaVersion": 1,
+        "id": "bad",
+        "repoName": "sample",
+        "repoPath": "/tmp/sample",
+        "worktreePath": "/tmp/worktree",
+        "branch": "agent/bad",
+        "baseRef": "main",
+        "state": "blocked",
+        "createdAt": "1970-01-01T00:00:00Z",
+        "updatedAt": "1970-01-01T00:00:00Z"
+      }
+      """.utf8
+    )
+    do {
+      _ = try MaestroJSON.decoder.decode(AgentTaskRecord.self, from: invalid)
+      throw CheckFailure("expected invalid agent lifecycle state to fail decoding")
+    } catch is DecodingError {
+      // Expected.
+    }
+  }
+
+  private static func legacyAgentEnvRecordsNormalizeWithoutPrompts() throws {
+    let tempRoot = FileManager.default.temporaryDirectory
+      .appendingPathComponent("maestro-agent-legacy-\(UUID().uuidString)")
+    defer {
+      try? FileManager.default.removeItem(at: tempRoot)
+    }
+
+    let registry = tempRoot.appendingPathComponent("_registry")
+    let reviews = registry.appendingPathComponent("reviews")
+    try FileManager.default.createDirectory(at: reviews, withIntermediateDirectories: true)
+    let artifact = reviews.appendingPathComponent("sample-review.md")
+    try "review".write(to: artifact, atomically: true, encoding: .utf8)
+
+    let recordFile = registry.appendingPathComponent("sample-20260101-task.env")
+    let legacy = """
+    task_id=sample-20260101-task
+    repo_name=node_account
+    repo_path=/tmp/node/node_account
+    worktree_path=/tmp/worktrees/sample\\ task
+    branch=agent/20260101-task
+    base_ref=main
+    state=review
+    created_at=2026-01-01T00:00:00Z
+    updated_at=2026-01-01T00:05:00Z
+    prompt=super-secret-prompt
+    note=Review\\ ready
+    review_artifact=\(artifact.path)
+    check_exit=0
+    review_exit=0
+    tmux_session=agents
+    tmux_window=agent:task\\ -\\ running
+    cleaned_at=''
+    """
+    try legacy.write(to: recordFile, atomically: true, encoding: .utf8)
+    let before = try FileManager.default.attributesOfItem(atPath: recordFile.path)[.modificationDate] as? Date
+
+    let store = AgentStateStore(
+      stateDirectory: tempRoot.appendingPathComponent("state"),
+      environment: ["AGENT_REGISTRY_DIR": registry.path]
+    )
+    let tasks = try store.list()
+    try expectEqual(tasks.count, 1, "legacy agent task count")
+    let task = try require(tasks.first, "legacy task")
+    try expectEqual(task.source, .legacy, "legacy task source")
+    try expectEqual(task.record.id, "sample-20260101-task", "legacy task id")
+    try expectEqual(task.record.state, .review, "legacy task state")
+    try expectEqual(task.record.worktreePath, "/tmp/worktrees/sample task", "legacy shell escaped path")
+    try expectEqual(task.record.note, "Review ready", "legacy shell escaped note")
+    try expectEqual(task.record.tmuxWindow, "agent:task - running", "legacy tmux window")
+    try expectEqual(task.reviewArtifactAvailable, true, "legacy review artifact availability")
+
+    let output = String(data: try MaestroJSON.encoder.encode(AgentTaskList(stateDirectory: store.stateDirectory.path, tasks: tasks)), encoding: .utf8) ?? ""
+    try expect(!output.contains("super-secret-prompt"), "legacy prompt is redacted from normalized JSON")
+    try expect(!output.contains("prompt"), "normalized JSON has no prompt key")
+
+    let after = try FileManager.default.attributesOfItem(atPath: recordFile.path)[.modificationDate] as? Date
+    try expectEqual(after, before, "legacy status read does not modify registry file")
+  }
+
+  private static func agentStateStoreWritesPrivateAtomicRecords() throws {
+    let tempRoot = FileManager.default.temporaryDirectory
+      .appendingPathComponent("maestro-agent-write-\(UUID().uuidString)")
+    defer {
+      try? FileManager.default.removeItem(at: tempRoot)
+    }
+
+    let store = AgentStateStore(stateDirectory: tempRoot, environment: [:])
+    let record = sampleAgentRecord(state: .running)
+    try store.writeActive(record)
+
+    let recordURL = store.activeDirectory.appendingPathComponent("\(record.id).json")
+    try expect(FileManager.default.fileExists(atPath: recordURL.path), "swift agent record exists")
+    let firstDecode = try MaestroJSON.decoder.decode(AgentTaskRecord.self, from: Data(contentsOf: recordURL))
+    try expectEqual(firstDecode, record, "written agent record decodes")
+    try expectEqual(filePermissions(recordURL), 0o600, "swift agent record permissions")
+
+    var updated = record
+    updated.state = .review
+    updated.updatedAt = Date(timeIntervalSince1970: 60)
+    try store.writeActive(updated)
+    let secondDecode = try MaestroJSON.decoder.decode(AgentTaskRecord.self, from: Data(contentsOf: recordURL))
+    try expectEqual(secondDecode, updated, "rewritten agent record decodes")
+    try expectEqual(filePermissions(recordURL), 0o600, "rewritten agent record permissions")
+
+    let files = try FileManager.default.contentsOfDirectory(atPath: store.activeDirectory.path)
+    try expectEqual(files, ["\(record.id).json"], "atomic write leaves only final record")
+  }
+
+  private static func invalidLegacyAgentStateFailsValidation() throws {
+    let tempRoot = FileManager.default.temporaryDirectory
+      .appendingPathComponent("maestro-agent-invalid-\(UUID().uuidString)")
+    defer {
+      try? FileManager.default.removeItem(at: tempRoot)
+    }
+
+    let registry = tempRoot.appendingPathComponent("_registry")
+    try FileManager.default.createDirectory(at: registry, withIntermediateDirectories: true)
+    try """
+    task_id=sample-invalid
+    repo_name=sample
+    state=blocked
+    created_at=2026-01-01T00:00:00Z
+    updated_at=2026-01-01T00:00:00Z
+    """.write(to: registry.appendingPathComponent("sample-invalid.env"), atomically: true, encoding: .utf8)
+
+    let store = AgentStateStore(
+      stateDirectory: tempRoot.appendingPathComponent("state"),
+      environment: ["AGENT_REGISTRY_DIR": registry.path]
+    )
+    do {
+      _ = try store.list()
+      throw CheckFailure("expected invalid legacy agent state to fail")
+    } catch let error as AgentStateStoreError {
+      guard case let .invalidLegacyRecord(path, reason) = error else {
+        throw CheckFailure("unexpected invalid legacy state error: \(error)")
+      }
+      try expect(path.hasSuffix("/_registry/sample-invalid.env"), "invalid legacy state path")
+      try expectEqual(reason, "Unknown state: blocked", "invalid legacy state reason")
+    }
   }
 
   private static func repoOpenPlanMatchesCompatibilityWindows() throws {
@@ -693,6 +905,34 @@ struct MaestroCoreChecks {
       configDirectory: repoRoot().appendingPathComponent("maestro/config"),
       pathResolver: RepoPathResolver(environment: ["HOME": "/Users/example"])
     ).load()
+  }
+
+  private static func sampleAgentRecord(state: AgentState) -> AgentTaskRecord {
+    AgentTaskRecord(
+      id: "sample-20260101-task",
+      repoName: "sample",
+      repoPath: "/tmp/sample",
+      worktreePath: "/tmp/worktrees/sample-20260101-task",
+      branch: "agent/20260101-task",
+      baseRef: "main",
+      state: state,
+      note: "Review ready",
+      checkExit: 0,
+      reviewExit: 0,
+      reviewArtifact: "/tmp/reviews/sample.md",
+      tmuxSession: "agents",
+      tmuxWindow: "agent:task - running",
+      createdAt: Date(timeIntervalSince1970: 0),
+      updatedAt: Date(timeIntervalSince1970: 0)
+    )
+  }
+
+  private static func filePermissions(_ url: URL) throws -> Int {
+    let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+    guard let permissions = attributes[.posixPermissions] as? NSNumber else {
+      throw CheckFailure("missing file permissions for \(url.path)")
+    }
+    return permissions.intValue & 0o777
   }
 
   private static func catalogWith(

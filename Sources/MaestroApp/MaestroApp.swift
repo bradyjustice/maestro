@@ -73,6 +73,7 @@ final class DashboardModel: ObservableObject {
   @Published var commands: [CommandDefinition] = []
   @Published var layouts: [LayoutDefinition] = []
   @Published var bundles: [BundleDefinition] = []
+  @Published var agentTasks: [AgentTaskSnapshot] = []
   @Published var permissionSnapshot = AutomationPermissionSnapshot(
     accessibilityTrusted: false,
     appleEventsAvailable: false
@@ -84,6 +85,7 @@ final class DashboardModel: ObservableObject {
   @Published var selectedRepoID: String?
   @Published var selectedActionID: String?
   @Published var selectedLayoutID: String?
+  @Published var selectedAgentTaskID: String?
   @Published var selectedScreenSelection = LayoutScreenSelection.active
   @Published var layoutPlan: LayoutPlan?
   @Published var layoutPlanError: String?
@@ -92,6 +94,7 @@ final class DashboardModel: ObservableObject {
   @Published var actionStepStatuses: [String: [String: DashboardActionStatus]] = [:]
   @Published var runningActionID: String?
   @Published var loadError: String?
+  @Published var agentLoadError: String?
 
   private let pathResolver = RepoPathResolver()
   private let environment = ProcessInfo.processInfo.environment
@@ -110,6 +113,10 @@ final class DashboardModel: ObservableObject {
     layouts.first { $0.id == selectedLayoutID } ?? layouts.first
   }
 
+  var selectedAgentTask: AgentTaskSnapshot? {
+    agentTasks.first { $0.id == selectedAgentTaskID } ?? agentTasks.first
+  }
+
   func load() {
     do {
       let catalog = try CatalogLoader().load()
@@ -124,6 +131,7 @@ final class DashboardModel: ObservableObject {
       selectedLayoutID = layouts.first?.id
       refreshPermissions(promptForAccessibility: false)
       refreshLayoutPlan()
+      refreshAgents()
       loadError = nil
     } catch {
       repos = []
@@ -131,6 +139,7 @@ final class DashboardModel: ObservableObject {
       commands = []
       layouts = []
       bundles = []
+      agentTasks = []
       self.catalog = nil
       layoutPlan = nil
       loadError = error.localizedDescription
@@ -315,6 +324,23 @@ final class DashboardModel: ObservableObject {
     } catch {
       layoutPlan = nil
       layoutPlanError = error.localizedDescription
+    }
+  }
+
+  func refreshAgents() {
+    do {
+      let store = AgentStateStore(environment: environment)
+      agentTasks = try store.list(includeArchived: false)
+      if let selectedAgentTaskID, !agentTasks.contains(where: { $0.id == selectedAgentTaskID }) {
+        self.selectedAgentTaskID = agentTasks.first?.id
+      } else if selectedAgentTaskID == nil {
+        selectedAgentTaskID = agentTasks.first?.id
+      }
+      agentLoadError = nil
+    } catch {
+      agentTasks = []
+      selectedAgentTaskID = nil
+      agentLoadError = error.localizedDescription
     }
   }
 
@@ -546,7 +572,7 @@ struct Overview: View {
         ActionList(model: model)
 
         SectionHeader(title: "Agents", systemImage: "person.crop.rectangle.stack")
-        AgentEmptyState()
+        AgentList(model: model)
       }
       .padding(20)
     }
@@ -701,6 +727,12 @@ struct DetailPane: View {
               DetailRow(label: "Screen", value: plan.screen.name)
               DetailRow(label: "Targets", value: "\(plan.moveCount) matched, \(plan.slots.count - plan.moveCount) missing")
             }
+          }
+        }
+
+        if let agentTask = model.selectedAgentTask {
+          DetailSection(title: agentTask.record.id, systemImage: "person.crop.rectangle.stack") {
+            AgentDetail(task: agentTask)
           }
         }
       }
@@ -1155,12 +1187,194 @@ struct SectionHeader: View {
   }
 }
 
+struct AgentList: View {
+  @ObservedObject var model: DashboardModel
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      HStack {
+        if let error = model.agentLoadError {
+          Label(error, systemImage: "exclamationmark.triangle")
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        Spacer()
+        Button {
+          model.refreshAgents()
+        } label: {
+          Label("Refresh", systemImage: "arrow.clockwise")
+        }
+        .controlSize(.small)
+      }
+
+      if model.agentTasks.isEmpty {
+        AgentEmptyState()
+      } else {
+        VStack(spacing: 0) {
+          ForEach(model.agentTasks) { task in
+            AgentRow(
+              task: task,
+              selected: task.id == model.selectedAgentTask?.id
+            ) {
+              model.selectedAgentTaskID = task.id
+            }
+            Divider()
+          }
+        }
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+      }
+    }
+  }
+}
+
+struct AgentRow: View {
+  var task: AgentTaskSnapshot
+  var selected: Bool
+  var select: () -> Void
+
+  var body: some View {
+    Button(action: select) {
+      HStack(spacing: 12) {
+        Image(systemName: task.reviewArtifactAvailable ? "doc.text.magnifyingglass" : "terminal")
+          .foregroundStyle(.secondary)
+          .frame(width: 22)
+
+        VStack(alignment: .leading, spacing: 4) {
+          HStack(spacing: 8) {
+            Text(task.record.id)
+              .font(.body)
+              .lineLimit(1)
+            AgentStateBadge(state: task.record.state)
+          }
+
+          Text("\(task.record.repoName)  \(task.record.branch)")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+
+          Text(task.record.worktreePath)
+            .font(.caption.monospaced())
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+
+        Spacer()
+
+        VStack(alignment: .trailing, spacing: 4) {
+          Text(task.source.rawValue)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          Text(task.reviewArtifactAvailable ? "review ready" : "no review")
+            .font(.caption)
+            .foregroundStyle(task.reviewArtifactAvailable ? .green : .secondary)
+        }
+      }
+      .padding(.horizontal, 12)
+      .padding(.vertical, 10)
+      .background(selected ? Color.accentColor.opacity(0.10) : Color.clear)
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+  }
+}
+
+struct AgentStateBadge: View {
+  var state: AgentState
+
+  var body: some View {
+    Text(state.rawValue)
+      .font(.caption.weight(.medium))
+      .foregroundStyle(foreground)
+      .padding(.horizontal, 8)
+      .padding(.vertical, 4)
+      .background(background)
+      .clipShape(Capsule())
+  }
+
+  private var foreground: Color {
+    switch state {
+    case .needsInput:
+      return .orange
+    case .merged:
+      return .green
+    case .abandoned:
+      return .secondary
+    case .queued, .running, .review:
+      return .primary
+    }
+  }
+
+  private var background: Color {
+    switch state {
+    case .queued:
+      return Color.gray.opacity(0.16)
+    case .running:
+      return Color.blue.opacity(0.16)
+    case .needsInput:
+      return Color.orange.opacity(0.18)
+    case .review:
+      return Color.green.opacity(0.16)
+    case .merged:
+      return Color.green.opacity(0.18)
+    case .abandoned:
+      return Color.gray.opacity(0.18)
+    }
+  }
+}
+
+struct AgentDetail: View {
+  var task: AgentTaskSnapshot
+
+  var body: some View {
+    let record = task.record
+
+    DetailRow(label: "Task", value: record.id)
+    DetailRow(label: "State", value: record.state.rawValue)
+    DetailRow(label: "Source", value: task.source.rawValue + (task.archived ? " archived" : " active"))
+    DetailRow(label: "Repo", value: record.repoName)
+    DetailRow(label: "Repo path", value: record.repoPath)
+    DetailRow(label: "Branch", value: record.branch)
+    DetailRow(label: "Base", value: record.baseRef)
+    DetailRow(label: "Worktree", value: record.worktreePath)
+    if let tmuxSession = record.tmuxSession, !tmuxSession.isEmpty {
+      DetailRow(label: "tmux", value: tmuxSession)
+    }
+    if let tmuxWindow = record.tmuxWindow, !tmuxWindow.isEmpty {
+      DetailRow(label: "Window", value: tmuxWindow)
+    }
+    DetailRow(label: "Created", value: DashboardDateFormatter.string(from: record.createdAt))
+    DetailRow(label: "Updated", value: DashboardDateFormatter.string(from: record.updatedAt))
+    if let cleanedAt = record.cleanedAt {
+      DetailRow(label: "Cleaned", value: DashboardDateFormatter.string(from: cleanedAt))
+    }
+    if let note = record.note, !note.isEmpty {
+      DetailRow(label: "Note", value: note)
+    }
+    if let checkExit = record.checkExit {
+      DetailRow(label: "Check", value: "\(checkExit)")
+    }
+    if let reviewExit = record.reviewExit {
+      DetailRow(label: "Review", value: "\(reviewExit)")
+    }
+    DetailRow(label: "Artifact", value: task.reviewArtifactAvailable ? "Available" : "None")
+    DetailRow(label: "Record", value: task.recordPath)
+  }
+}
+
+enum DashboardDateFormatter {
+  static func string(from date: Date) -> String {
+    ISO8601DateFormatter().string(from: date)
+  }
+}
+
 struct AgentEmptyState: View {
   var body: some View {
     HStack(spacing: 12) {
       Image(systemName: "tray")
         .foregroundStyle(.secondary)
-      Text("No native agent records loaded")
+      Text("No active agent tasks")
         .foregroundStyle(.secondary)
       Spacer()
     }
