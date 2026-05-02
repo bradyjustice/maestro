@@ -15,18 +15,17 @@ struct MaestroCoreChecks {
     try layoutPlannerFiltersUnmanagedWindows()
     try riskPolicyBlocksUnknownRiskyScripts()
     try discoveredRiskyScriptsStayBlockedUntilConfigured()
+    try actionExecutionExpandsBundlesDeterministically()
+    try actionExecutionCommandEligibilityIsExplicit()
+    try actionExecutionReportsBlockedBundleReasons()
+    try actionAuditLogWritesJSONLines()
     try catalogValidationReportsFailures()
     try jsonErrorEncodingStaysStable()
     print("Maestro core checks passed.")
   }
 
   private static func checkedInCatalogLoads() throws {
-    let loader = CatalogLoader(
-      configDirectory: repoRoot().appendingPathComponent("maestro/config"),
-      pathResolver: RepoPathResolver(environment: ["HOME": "/Users/example"])
-    )
-
-    let catalog = try loader.load()
+    let catalog = try checkedInCatalog()
 
     try expectEqual(catalog.repos.map(\.key), [
       "node",
@@ -309,6 +308,109 @@ struct MaestroCoreChecks {
     try expectEqual(deploy.confirmation, .blocked, "risky discovered command remains blocked")
   }
 
+  private static func actionExecutionExpandsBundlesDeterministically() throws {
+    let catalog = try checkedInCatalog()
+    let planner = ActionExecutionPlanner(
+      catalog: catalog,
+      pathResolver: RepoPathResolver(environment: ["HOME": "/Users/example"]),
+      environment: ["TMUX": "1"]
+    )
+
+    let plan = try planner.plan(actionID: "bundle.backend.cockpit.run")
+
+    try expect(plan.runnable, "backend cockpit bundle is runnable")
+    try expectEqual(plan.steps.map(\.actionID), [
+      "repo.account.open",
+      "repo.admin.open",
+      "command.account.dev.run",
+      "command.admin.dev.run",
+      "layout.terminal.quad.apply"
+    ], "backend cockpit expansion order")
+    try expectEqual(plan.steps.map(\.id), [
+      "1.repo.account.open",
+      "2.repo.admin.open",
+      "3.command.account.dev.run",
+      "4.command.admin.dev.run",
+      "5.layout.terminal.quad.apply"
+    ], "backend cockpit deterministic step ids")
+  }
+
+  private static func actionExecutionCommandEligibilityIsExplicit() throws {
+    let catalog = try checkedInCatalog()
+    let planner = ActionExecutionPlanner(
+      catalog: catalog,
+      pathResolver: RepoPathResolver(environment: ["HOME": "/Users/example"]),
+      environment: ["TMUX": "1"]
+    )
+
+    let devPlan = try planner.plan(actionID: "command.account.dev.run")
+    let devStep = try require(devPlan.steps.first, "account dev action step")
+    let commandPlan = try require(devStep.commandRunPlan, "account dev command run plan")
+    try expect(devPlan.runnable, "safe singleton command is runnable")
+    try expectEqual(commandPlan.argv, ["npm", "run", "dev"], "safe command argv")
+    try expectEqual(commandPlan.displayCommand, "npm run dev", "safe command display")
+    try expectEqual(commandPlan.tmuxPane, "account:dev.0", "safe command tmux target")
+    try expectEqual(commandPlan.tmuxCommands.map(\.arguments), [
+      ["select-window", "-t", "account:dev"],
+      ["send-keys", "-t", "account:dev.0", "npm run dev", "C-m"]
+    ], "safe command tmux commands")
+
+    let checkPlan = try planner.plan(actionID: "command.account.check.run")
+    try expect(!checkPlan.runnable, "foreground command is blocked until supported")
+    try expect(
+      checkPlan.blockedReasons.contains { $0.contains("Unsupported command behavior: foreground.") },
+      "unsupported behavior reason is visible"
+    )
+  }
+
+  private static func actionExecutionReportsBlockedBundleReasons() throws {
+    let catalog = try checkedInCatalog()
+    let planner = ActionExecutionPlanner(
+      catalog: catalog,
+      pathResolver: RepoPathResolver(environment: ["HOME": "/Users/example"]),
+      environment: ["TMUX": "1"]
+    )
+
+    let plan = try planner.plan(actionID: "bundle.agent.reviewLoop.run")
+
+    try expect(!plan.runnable, "agent review loop bundle is blocked")
+    try expectEqual(plan.steps.map(\.actionID), [
+      "agent.status.show",
+      "layout.terminal.stack.apply"
+    ], "blocked bundle remains inspectable")
+    try expect(
+      plan.blockedReasons.contains { $0.contains("Agent action execution is not supported") },
+      "blocked bundle explains unsupported agent"
+    )
+  }
+
+  private static func actionAuditLogWritesJSONLines() throws {
+    let tempRoot = FileManager.default.temporaryDirectory
+      .appendingPathComponent("maestro-core-checks-\(UUID().uuidString)")
+    defer {
+      try? FileManager.default.removeItem(at: tempRoot)
+    }
+
+    let log = ActionAuditLog(stateDirectory: tempRoot)
+    let event = AuditEvent(
+      id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+      timestamp: Date(timeIntervalSince1970: 0),
+      actionID: "bundle.backend.cockpit.run",
+      actor: "check",
+      target: "bundle:bundle.backend.cockpit.run",
+      risk: .safe,
+      outcome: "started",
+      message: "Started Backend Cockpit."
+    )
+
+    try log.append(event)
+    let text = try String(contentsOf: log.fileURL, encoding: .utf8)
+    let lines = text.split(separator: "\n")
+    try expectEqual(lines.count, 1, "audit log writes one JSONL line")
+    let decoded = try MaestroJSON.decoder.decode(AuditEvent.self, from: Data(lines[0].utf8))
+    try expectEqual(decoded, event, "audit log event round-trips")
+  }
+
   private static func catalogValidationReportsFailures() throws {
     let repo = RepoDefinition(
       key: "account",
@@ -454,6 +556,13 @@ struct MaestroCoreChecks {
       url.deleteLastPathComponent()
     }
     return url.deletingLastPathComponent()
+  }
+
+  private static func checkedInCatalog() throws -> CatalogBundle {
+    try CatalogLoader(
+      configDirectory: repoRoot().appendingPathComponent("maestro/config"),
+      pathResolver: RepoPathResolver(environment: ["HOME": "/Users/example"])
+    ).load()
   }
 
   private static func expect(_ condition: Bool, _ message: String) throws {

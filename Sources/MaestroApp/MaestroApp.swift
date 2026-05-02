@@ -85,12 +85,14 @@ final class DashboardModel: ObservableObject {
   @Published var layoutPlanError: String?
   @Published var layoutApplyMessage: String?
   @Published var actionStatuses: [String: DashboardActionStatus] = [:]
+  @Published var actionStepStatuses: [String: [String: DashboardActionStatus]] = [:]
   @Published var runningActionID: String?
   @Published var loadError: String?
 
   private let pathResolver = RepoPathResolver()
   private let environment = ProcessInfo.processInfo.environment
   private let automation = NativeMacAutomation()
+  private var catalog: CatalogBundle?
 
   var selectedRepo: RepoDefinition? {
     repos.first { $0.id == selectedRepoID } ?? repos.first
@@ -107,6 +109,7 @@ final class DashboardModel: ObservableObject {
   func load() {
     do {
       let catalog = try CatalogLoader().load()
+      self.catalog = catalog
       repos = catalog.repos
       actions = catalog.actions
       commands = catalog.commands
@@ -124,6 +127,7 @@ final class DashboardModel: ObservableObject {
       commands = []
       layouts = []
       bundles = []
+      self.catalog = nil
       layoutPlan = nil
       loadError = error.localizedDescription
     }
@@ -162,50 +166,40 @@ final class DashboardModel: ObservableObject {
     return bundles.first { $0.id == bundleID }
   }
 
-  func actionAvailability(for action: ActionDefinition) -> DashboardActionAvailability {
-    guard action.enabled else {
-      return DashboardActionAvailability(
-        canRun: false,
-        reason: "This action is blocked by catalog policy."
-      )
+  func executionPlan(for action: ActionDefinition) -> ActionExecutionPlan? {
+    guard let catalog else {
+      return nil
     }
+    return try? ActionExecutionPlanner(
+      catalog: catalog,
+      pathResolver: pathResolver,
+      environment: environment
+    ).plan(actionID: action.id)
+  }
 
-    switch action.type {
-    case .repoOpen:
-      guard action.repoKey != nil else {
-        return DashboardActionAvailability(canRun: false, reason: "No repo target is configured for this action.")
-      }
-      guard repo(for: action) != nil else {
-        return DashboardActionAvailability(canRun: false, reason: "The configured repo target is not in the catalog.")
-      }
-      return .runnable
-    case .layout:
-      guard action.layoutID != nil else {
-        return DashboardActionAvailability(canRun: false, reason: "No layout target is configured for this action.")
-      }
-      guard layout(for: action) != nil else {
-        return DashboardActionAvailability(canRun: false, reason: "The configured layout target is not in the catalog.")
-      }
-      return .runnable
-    case .commandRun:
+  func actionAvailability(for action: ActionDefinition) -> DashboardActionAvailability {
+    guard let plan = executionPlan(for: action) else {
+      return DashboardActionAvailability(canRun: false, reason: "Unable to plan this action.")
+    }
+    guard plan.runnable else {
       return DashboardActionAvailability(
         canRun: false,
-        reason: "Command actions are visible for review; dashboard execution is not enabled yet."
-      )
-    case .agent:
-      return DashboardActionAvailability(
-        canRun: false,
-        reason: "Agent actions are visible for status; dashboard execution is not enabled yet."
-      )
-    case .bundle:
-      return DashboardActionAvailability(
-        canRun: false,
-        reason: "Bundle actions are visible for planning; dashboard execution waits for confirmation support."
+        reason: plan.blockedReasons.first ?? "This action has blocked steps."
       )
     }
+    return .runnable
   }
 
   func expectedBehavior(for action: ActionDefinition) -> String {
+    if let plan = executionPlan(for: action) {
+      if action.type == .bundle {
+        return "Run \(plan.steps.count) expanded action step(s) in order, stopping on the first failure."
+      }
+      if let commandPlan = plan.steps.first?.commandRunPlan {
+        return "Open \(commandPlan.repoKey), select tmux target \(commandPlan.tmuxPane), and send \(commandPlan.displayCommand)."
+      }
+    }
+
     switch action.type {
     case .repoOpen:
       guard let repo = repo(for: action) else {
@@ -218,11 +212,11 @@ final class DashboardModel: ObservableObject {
       }
       return "Select \(layout.label), plan it for the current screen choice, and apply matched windows."
     case .commandRun:
-      return "Show the command target without running it from the dashboard."
+      return "Run the command if it is safe, local, modeled with argv, and uses a supported tmux behavior."
     case .agent:
-      return "Show the agent action without starting native agent work."
+      return "Agent execution is visible in bundles but is not supported yet."
     case .bundle:
-      return "Show the bundle contents without running bundled actions."
+      return "Run the expanded bundle steps in order."
     }
   }
 
@@ -235,13 +229,44 @@ final class DashboardModel: ObservableObject {
       return
     }
 
-    switch action.type {
-    case .repoOpen:
-      runRepoOpenAction(action)
-    case .layout:
-      runLayoutAction(action)
-    case .commandRun, .agent, .bundle:
-      actionStatuses[action.id] = .failed(actionAvailability(for: action).reason)
+    guard let catalog, let plan = executionPlan(for: action) else {
+      actionStatuses[action.id] = .failed("Unable to plan this action.")
+      return
+    }
+
+    let executionEnvironment = environment
+    let screenSelection = selectedScreenSelection
+    runningActionID = action.id
+    actionStatuses[action.id] = .running("Running \(action.label)...")
+    actionStepStatuses[action.id] = Dictionary(
+      uniqueKeysWithValues: plan.steps.map { ($0.id, DashboardActionStatus.running("Queued.")) }
+    )
+
+    Task {
+      let execution = await Task.detached(priority: .userInitiated) { () -> (result: ActionExecutionResult?, error: String?) in
+        do {
+          let executor = ActionExecutionExecutor(
+            catalog: catalog,
+            environment: executionEnvironment,
+            screenSelection: screenSelection
+          )
+          return (try executor.run(plan: plan), nil)
+        } catch {
+          return (nil, error.localizedDescription)
+        }
+      }.value
+
+      if let result = execution.result {
+        actionStatuses[action.id] = result.ok ? .succeeded(result.message) : .failed(result.message)
+        actionStepStatuses[action.id] = stepStatuses(from: result)
+        if result.plan.steps.contains(where: { $0.type == .layout }) {
+          refreshPermissions(promptForAccessibility: false)
+          refreshLayoutPlan()
+        }
+      } else if let message = execution.error {
+        actionStatuses[action.id] = .failed(message)
+      }
+      runningActionID = nil
     }
   }
 
@@ -356,6 +381,21 @@ final class DashboardModel: ObservableObject {
 
   func resolvedPath(for repo: RepoDefinition) -> String {
     pathResolver.resolve(repo.path)
+  }
+
+  private func stepStatuses(from result: ActionExecutionResult) -> [String: DashboardActionStatus] {
+    Dictionary(uniqueKeysWithValues: result.steps.map { step in
+      let status: DashboardActionStatus
+      switch step.outcome {
+      case .succeeded:
+        status = .succeeded(step.message)
+      case .failed:
+        status = .failed(step.message)
+      case .skipped:
+        status = .failed(step.message)
+      }
+      return (step.id, status)
+    })
   }
 }
 
@@ -651,6 +691,14 @@ struct ActionDetail: View {
       DetailRow(label: "Disabled", value: availability.reason)
     }
 
+    if let plan = model.executionPlan(for: action) {
+      Divider()
+      ActionExecutionPlanView(
+        plan: plan,
+        statuses: model.actionStepStatuses[action.id] ?? [:]
+      )
+    }
+
     HStack {
       Button {
         model.runAction(action)
@@ -699,6 +747,10 @@ struct ActionDetail: View {
         DetailRow(label: "Command", value: command.id)
         DetailRow(label: "Repo", value: command.repoKey ?? "None")
         DetailRow(label: "Behavior", value: command.behavior.rawValue)
+        if let commandPlan = model.executionPlan(for: action)?.steps.first?.commandRunPlan {
+          DetailRow(label: "tmux", value: commandPlan.tmuxPane)
+          DetailRow(label: "argv", value: commandPlan.displayCommand)
+        }
       } else {
         DetailRow(label: "Target", value: action.commandID ?? "Missing command")
       }
@@ -712,6 +764,98 @@ struct ActionDetail: View {
       } else {
         DetailRow(label: "Target", value: action.bundleID ?? "Missing bundle")
       }
+    }
+  }
+}
+
+struct ActionExecutionPlanView: View {
+  var plan: ActionExecutionPlan
+  var statuses: [String: DashboardActionStatus]
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      HStack {
+        Label("Execution Plan", systemImage: "list.number")
+          .font(.headline)
+        Spacer()
+        Text(plan.runnable ? "Runnable" : "Blocked")
+          .font(.caption)
+          .foregroundStyle(plan.runnable ? .green : .orange)
+      }
+
+      VStack(spacing: 0) {
+        ForEach(plan.steps) { step in
+          ActionExecutionStepRow(step: step, status: statuses[step.id])
+          Divider()
+        }
+      }
+      .background(Color(nsColor: .controlBackgroundColor))
+      .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+  }
+}
+
+struct ActionExecutionStepRow: View {
+  var step: ActionExecutionStep
+  var status: DashboardActionStatus?
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(spacing: 8) {
+        Text("\(step.index + 1)")
+          .font(.caption.monospacedDigit())
+          .foregroundStyle(.secondary)
+          .frame(width: 22, alignment: .leading)
+        Image(systemName: icon(for: step.type))
+          .foregroundStyle(.secondary)
+          .frame(width: 18)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(step.label)
+            .font(.body)
+          Text(step.actionID)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        Spacer()
+        if let status {
+          Image(systemName: status.systemImage)
+            .foregroundStyle(status.foreground)
+        } else {
+          Text(step.runnable ? "Ready" : "Blocked")
+            .font(.caption)
+            .foregroundStyle(step.runnable ? Color.secondary : Color.orange)
+        }
+      }
+
+      if let commandPlan = step.commandRunPlan {
+        DetailRow(label: "tmux", value: commandPlan.tmuxPane)
+        DetailRow(label: "Command", value: commandPlan.displayCommand)
+      }
+      if let reason = step.blockedReason {
+        Text(reason)
+          .font(.caption)
+          .foregroundStyle(.orange)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+      if let status {
+        ActionStatusLine(status: status)
+      }
+    }
+    .padding(10)
+  }
+
+  private func icon(for type: ActionType) -> String {
+    switch type {
+    case .repoOpen:
+      return "folder"
+    case .commandRun:
+      return "terminal"
+    case .agent:
+      return "person.crop.rectangle.stack"
+    case .layout:
+      return "rectangle.3.group"
+    case .bundle:
+      return "square.stack.3d.up"
     }
   }
 }

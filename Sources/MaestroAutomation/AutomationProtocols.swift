@@ -60,6 +60,8 @@ public struct ItermReadinessSnapshot: Codable, Equatable, Sendable {
   public var bundleIdentifier: String
   public var installed: Bool
   public var running: Bool
+  public var launchServicesReady: Bool
+  public var knownBundlePathFound: Bool
   public var applicationPath: String?
   public var notes: [String]
 
@@ -67,14 +69,157 @@ public struct ItermReadinessSnapshot: Codable, Equatable, Sendable {
     bundleIdentifier: String = "com.googlecode.iterm2",
     installed: Bool,
     running: Bool,
+    launchServicesReady: Bool? = nil,
+    knownBundlePathFound: Bool = false,
     applicationPath: String? = nil,
     notes: [String] = []
   ) {
     self.bundleIdentifier = bundleIdentifier
     self.installed = installed
     self.running = running
+    self.launchServicesReady = launchServicesReady ?? installed
+    self.knownBundlePathFound = knownBundlePathFound
     self.applicationPath = applicationPath
     self.notes = notes
+  }
+}
+
+public struct ItermApplicationResolution: Equatable, Sendable {
+  public var bundleIdentifier: String
+  public var launchServicesURL: URL?
+  public var knownBundleURL: URL?
+
+  public init(
+    bundleIdentifier: String,
+    launchServicesURL: URL?,
+    knownBundleURL: URL?
+  ) {
+    self.bundleIdentifier = bundleIdentifier
+    self.launchServicesURL = launchServicesURL
+    self.knownBundleURL = knownBundleURL
+  }
+
+  public var applicationURL: URL? {
+    launchServicesURL ?? knownBundleURL
+  }
+
+  public var launchServicesReady: Bool {
+    launchServicesURL != nil
+  }
+
+  public var knownBundlePathFound: Bool {
+    knownBundleURL != nil
+  }
+
+  public var installed: Bool {
+    applicationURL != nil
+  }
+}
+
+public struct ItermApplicationResolver {
+  public static let bundleIdentifier = "com.googlecode.iterm2"
+
+  public static let knownBundlePaths = [
+    "/Applications/iTerm.app",
+    "/Applications/iTerm2.app",
+    "~/Applications/iTerm.app",
+    "~/Applications/iTerm2.app"
+  ]
+
+  public var bundleIdentifier: String
+  public var knownBundlePaths: [String]
+  public var homeDirectory: String
+  public var fileManager: FileManager
+
+  public init(
+    bundleIdentifier: String = ItermApplicationResolver.bundleIdentifier,
+    knownBundlePaths: [String] = ItermApplicationResolver.knownBundlePaths,
+    homeDirectory: String = NSHomeDirectory(),
+    fileManager: FileManager = .default
+  ) {
+    self.bundleIdentifier = bundleIdentifier
+    self.knownBundlePaths = knownBundlePaths
+    self.homeDirectory = homeDirectory
+    self.fileManager = fileManager
+  }
+
+  public func resolve(launchServicesURL: URL?) -> ItermApplicationResolution {
+    ItermApplicationResolution(
+      bundleIdentifier: bundleIdentifier,
+      launchServicesURL: launchServicesURL,
+      knownBundleURL: fallbackBundleURL(excluding: launchServicesURL)
+    )
+  }
+
+  private func fallbackBundleURL(excluding launchServicesURL: URL?) -> URL? {
+    for path in knownBundlePaths {
+      let url = URL(fileURLWithPath: expandHome(in: path))
+      if let launchServicesURL,
+         launchServicesURL.standardizedFileURL.path == url.standardizedFileURL.path {
+        continue
+      }
+      guard fileManager.fileExists(atPath: url.path),
+            Bundle(url: url)?.bundleIdentifier == bundleIdentifier else {
+        continue
+      }
+      return url
+    }
+    return nil
+  }
+
+  private func expandHome(in path: String) -> String {
+    guard path == "~" || path.hasPrefix("~/") else {
+      return path
+    }
+    if path == "~" {
+      return homeDirectory
+    }
+    return homeDirectory + "/" + path.dropFirst(2)
+  }
+}
+
+public struct LayoutRuntimeReadinessSnapshot: Codable, Equatable, Sendable {
+  public var ready: Bool
+  public var accessibilityTrusted: Bool
+  public var appleEventsAvailable: Bool
+  public var iTermInstalled: Bool
+  public var iTermWindowCreationAvailable: Bool
+  public var blockedReasons: [String]
+
+  public init(
+    ready: Bool,
+    accessibilityTrusted: Bool,
+    appleEventsAvailable: Bool,
+    iTermInstalled: Bool,
+    iTermWindowCreationAvailable: Bool,
+    blockedReasons: [String] = []
+  ) {
+    self.ready = ready
+    self.accessibilityTrusted = accessibilityTrusted
+    self.appleEventsAvailable = appleEventsAvailable
+    self.iTermInstalled = iTermInstalled
+    self.iTermWindowCreationAvailable = iTermWindowCreationAvailable
+    self.blockedReasons = blockedReasons
+  }
+}
+
+public enum ItermWindowProvisioning {
+  public static let layoutVariableName = "user.maestroLayout"
+  public static let slotVariableName = "user.maestroSlot"
+  public static let roleVariableName = "user.maestroRole"
+
+  public static func layoutUsesIterm(_ layout: LayoutDefinition) -> Bool {
+    layout.slots.contains { AppMatcher.isIterm(appName: $0.app) }
+  }
+
+  public static func layoutUsesIterm(_ plan: LayoutPlan) -> Bool {
+    plan.slots.contains { AppMatcher.isIterm(appName: $0.app) }
+  }
+
+  public static func missingItermSlots(in plan: LayoutPlan) -> [LayoutPlanSlot] {
+    plan.slots.filter { slot in
+      slot.status == .missingWindow && AppMatcher.isIterm(appName: slot.app)
+    }
   }
 }
 
@@ -93,6 +238,13 @@ public protocol WindowAutomation {
 public protocol LayoutAutomation {
   func planLayout(_ layout: LayoutDefinition, screenSelection: LayoutScreenSelection) throws -> LayoutPlan
   func applyLayout(_ plan: LayoutPlan) throws -> LayoutApplicationResult
+}
+
+public protocol LayoutRuntimeReadinessProviding {
+  func layoutReadiness(
+    for layout: LayoutDefinition,
+    promptForAccessibility: Bool
+  ) -> LayoutRuntimeReadinessSnapshot
 }
 
 public protocol CommandRunning {

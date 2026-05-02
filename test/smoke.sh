@@ -60,6 +60,9 @@ fi
 "$repo_root/bin/maestro" repo open account --dry-run --json > "$tmp/maestro-repo-open.json"
 "$repo_root/bin/maestro" command list --json > "$tmp/maestro-commands.json"
 "$repo_root/bin/maestro" action list --json > "$tmp/maestro-actions.json"
+"$repo_root/bin/maestro" action run bundle.node.cockpit.run --dry-run --json > "$tmp/maestro-node-bundle-plan.json"
+"$repo_root/bin/maestro" action run bundle.backend.cockpit.run --dry-run --json > "$tmp/maestro-backend-bundle-plan.json"
+"$repo_root/bin/maestro" action run bundle.frontend.cockpit.run --dry-run --json > "$tmp/maestro-frontend-bundle-plan.json"
 "$repo_root/bin/maestro" work dev all shell --dry-run --json > "$tmp/maestro-work-dev.json"
 "$repo_root/bin/maestro" layout list --json > "$tmp/maestro-layouts.json"
 "$repo_root/bin/maestro" layout plan terminal.quad --screen main --json > "$tmp/maestro-layout-plan.json"
@@ -86,6 +89,24 @@ fi
 if ! grep -q '"id" : "repo.account.open"' "$tmp/maestro-actions.json"; then
   printf 'Expected maestro action list JSON to include repo.account.open; saw:\n' >&2
   cat "$tmp/maestro-actions.json" >&2
+  exit 1
+fi
+
+if ! grep -q '"actionID" : "bundle.node.cockpit.run"' "$tmp/maestro-node-bundle-plan.json" || ! grep -q '"actionID" : "layout.coding.workspace.apply"' "$tmp/maestro-node-bundle-plan.json"; then
+  printf 'Expected node cockpit dry-run JSON to include expanded layout action; saw:\n' >&2
+  cat "$tmp/maestro-node-bundle-plan.json" >&2
+  exit 1
+fi
+
+if ! grep -q '"actionID" : "command.account.dev.run"' "$tmp/maestro-backend-bundle-plan.json" || ! grep -q '"tmuxPane" : "account:dev.0"' "$tmp/maestro-backend-bundle-plan.json"; then
+  printf 'Expected backend cockpit dry-run JSON to include account dev command target; saw:\n' >&2
+  cat "$tmp/maestro-backend-bundle-plan.json" >&2
+  exit 1
+fi
+
+if ! grep -q '"actionID" : "command.website.dev.run"' "$tmp/maestro-frontend-bundle-plan.json" || ! grep -q '"displayCommand" : "npm run dev"' "$tmp/maestro-frontend-bundle-plan.json"; then
+  printf 'Expected frontend cockpit dry-run JSON to include website dev command; saw:\n' >&2
+  cat "$tmp/maestro-frontend-bundle-plan.json" >&2
   exit 1
 fi
 
@@ -153,6 +174,8 @@ tools_root="$tmp/maestro"
 mkdir -p "$tools_root"
 resume_root="$tmp/resume"
 mkdir -p "$resume_root"
+action_tmux_log="$tmp/action-tmux.log"
+action_state="$tmp/action-state"
 
 tmux() {
   printf '%s\n' "$*" >> "$tmux_log"
@@ -168,6 +191,31 @@ tmux_log="$symlink_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" 
 if ! grep -q '^select-window -t node:coding1$' "$symlink_tmux_log"; then
   printf 'Expected symlinked work node to select the first named window; saw:\n' >&2
   cat "$symlink_tmux_log" >&2
+  exit 1
+fi
+
+tmux_log="$action_tmux_log" PATH="$fake_bin:$PATH" WORK_NODE_ROOT="$work_root" MAESTRO_STATE_DIR="$action_state" TMUX=1 TMUX_HAS_SESSION_RESULT=1 "$repo_root/bin/maestro" action run command.website.dev.run --json > "$tmp/maestro-action-run.json"
+
+if ! grep -Fqx "new-session -d -s website -n coding1 -c $work_root/node_website" "$action_tmux_log"; then
+  printf 'Expected action command run to open the website repo session; saw:\n' >&2
+  cat "$action_tmux_log" >&2
+  exit 1
+fi
+
+if ! grep -Fqx "send-keys -t website:dev.0 npm run dev C-m" "$action_tmux_log"; then
+  printf 'Expected action command run to send npm run dev to the configured dev pane; saw:\n' >&2
+  cat "$action_tmux_log" >&2
+  exit 1
+fi
+
+if [[ ! -s "$action_state/audit/actions.jsonl" ]]; then
+  printf 'Expected action execution to create an audit log under MAESTRO_STATE_DIR.\n' >&2
+  exit 1
+fi
+
+if ! grep -q '"actionID":"command.website.dev.run"' "$action_state/audit/actions.jsonl" || ! grep -q '"outcome":"succeeded"' "$action_state/audit/actions.jsonl"; then
+  printf 'Expected audit log to include command.website.dev.run success; saw:\n' >&2
+  cat "$action_state/audit/actions.jsonl" >&2
   exit 1
 fi
 

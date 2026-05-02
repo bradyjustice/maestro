@@ -192,8 +192,18 @@ public struct LayoutPlan: Codable, Equatable, Sendable {
     slots.filter { $0.window != nil }.count
   }
 
+  public var missingItermSlotCount: Int {
+    slots.filter { slot in
+      slot.status == .missingWindow && AppMatcher.isIterm(appName: slot.app)
+    }.count
+  }
+
+  public var actionableSlotCount: Int {
+    moveCount + missingItermSlotCount
+  }
+
   public var canExecute: Bool {
-    inventoryStatus == .available && moveCount > 0
+    inventoryStatus == .available && actionableSlotCount > 0
   }
 }
 
@@ -201,6 +211,7 @@ public struct LayoutApplicationResult: Codable, Equatable, Sendable {
   public var ok: Bool
   public var layoutID: String
   public var movedWindowCount: Int
+  public var createdWindowCount: Int
   public var skippedSlotCount: Int
   public var issues: [LayoutPlanIssue]
 
@@ -208,12 +219,14 @@ public struct LayoutApplicationResult: Codable, Equatable, Sendable {
     ok: Bool,
     layoutID: String,
     movedWindowCount: Int,
+    createdWindowCount: Int = 0,
     skippedSlotCount: Int,
     issues: [LayoutPlanIssue] = []
   ) {
     self.ok = ok
     self.layoutID = layoutID
     self.movedWindowCount = movedWindowCount
+    self.createdWindowCount = createdWindowCount
     self.skippedSlotCount = skippedSlotCount
     self.issues = issues
   }
@@ -430,6 +443,13 @@ public struct LayoutPlanner: Sendable {
 }
 
 public enum AppMatcher {
+  public static func isIterm(appName: String, bundleIdentifier: String? = nil) -> Bool {
+    let appAliases = aliases(for: appName, bundleIdentifier: bundleIdentifier)
+    return appAliases.contains("iterm") ||
+      appAliases.contains("iterm2") ||
+      appAliases.contains("comgooglecodeiterm2")
+  }
+
   public static func matches(slotApp: String, window: WindowSnapshot) -> Bool {
     let slotAliases = aliases(for: slotApp, bundleIdentifier: nil)
     let windowAliases = aliases(for: window.appName, bundleIdentifier: window.bundleIdentifier)

@@ -143,6 +143,7 @@ struct Command {
   private func runActions(_ arguments: [String]) throws {
     var args = arguments
     let json = consumeFlag("--json", from: &args)
+    let dryRun = consumeFlag("--dry-run", from: &args)
 
     guard let subcommand = args.first else {
       throw CLIError(message: "Missing action subcommand.", code: "missing_action_subcommand", exitCode: 2, json: json)
@@ -151,6 +152,9 @@ struct Command {
 
     switch subcommand {
     case "list":
+      guard !dryRun else {
+        throw CLIError(message: "--dry-run is only valid with action run.", code: "unexpected_arguments", exitCode: 2, json: json)
+      }
       guard args.isEmpty else {
         throw CLIError(message: "Unexpected action list arguments: \(args.joined(separator: " "))", code: "unexpected_arguments", exitCode: 2, json: json)
       }
@@ -162,6 +166,41 @@ struct Command {
           let enabled = action.enabled ? "enabled" : "blocked"
           print("\(action.id)\t\(action.type.rawValue)\t\(action.risk.rawValue)\t\(enabled)\t\(action.label)")
         }
+      }
+    case "run":
+      guard let actionID = args.first else {
+        throw CLIError(message: "Missing action id.", code: "missing_action", exitCode: 2, json: json)
+      }
+      guard args.count == 1 else {
+        throw CLIError(message: "Unexpected action run arguments: \(args.dropFirst().joined(separator: " "))", code: "unexpected_arguments", exitCode: 2, json: json)
+      }
+
+      let catalog = try loadCatalog()
+      let executor = ActionExecutionExecutor(
+        catalog: catalog,
+        environment: environment,
+        screenSelection: .active
+      )
+      let plan = try executor.plan(actionID: actionID)
+      if dryRun {
+        if json {
+          writeJSON(plan)
+        } else {
+          printActionPlan(plan)
+        }
+        return
+      }
+
+      let result = try executor.run(plan: plan)
+      if json {
+        writeJSON(result)
+        if !result.ok {
+          exit(1)
+        }
+      } else if result.ok {
+        print(result.message)
+      } else {
+        throw CLIError(message: result.message, code: "action_run_failed", exitCode: 1, json: false, prefixed: false)
       }
     default:
       throw CLIError(message: "Unknown action subcommand: \(subcommand)", code: "unknown_action_subcommand", exitCode: 2, json: json)
@@ -484,6 +523,7 @@ func printHelp() {
       maestro repo open <repo> [--json] [--dry-run]
       maestro command list [--repo <repo>] [--json]
       maestro action list [--json]
+      maestro action run <action-id> [--json] [--dry-run]
       maestro work dev <target...> [--json] [--dry-run]
       maestro layout list [--json]
       maestro layout plan <layout> [--screen active|main] [--json]
@@ -518,4 +558,25 @@ func workUsage() -> String {
     admin     node_admin
     shell     shell pane in node root
   """
+}
+
+func printActionPlan(_ plan: ActionExecutionPlan) {
+  let state = plan.runnable ? "runnable" : "blocked"
+  print("\(plan.actionID)\t\(state)\t\(plan.label)")
+  for step in plan.steps {
+    let stepState = step.runnable ? "ready" : "blocked"
+    print("\(step.index + 1).\t\(step.actionID)\t\(stepState)\t\(step.label)")
+    if let reason = step.blockedReason {
+      print("  reason: \(reason)")
+    }
+    if let commandPlan = step.commandRunPlan {
+      print("  tmux: \(commandPlan.tmuxPane)")
+      print("  command: \(commandPlan.displayCommand)")
+    }
+  }
+  if plan.steps.isEmpty {
+    for reason in plan.blockedReasons {
+      print("blocked: \(reason)")
+    }
+  }
 }
