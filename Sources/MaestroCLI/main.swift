@@ -424,9 +424,27 @@ struct Command {
       stateDirectory: MaestroPaths.defaultStateDirectory(environment: environment),
       environment: environment
     )
+    let executor = AgentWorkflowExecutor(
+      store: store,
+      catalog: try? loadCatalog(),
+      environment: environment
+    )
 
     do {
       switch subcommand {
+      case "start":
+        guard args.count >= 2 else {
+          throw CLIError(message: "Missing agent start arguments.", code: "missing_agent_start_arguments", exitCode: 2, json: json)
+        }
+        let repo = args.removeFirst()
+        let taskSlug = args.removeFirst()
+        let prompt = args.isEmpty ? nil : args.joined(separator: " ")
+        let result = try executor.start(repoArgument: repo, taskSlug: taskSlug, prompt: prompt)
+        if json {
+          writeJSON(result)
+        } else {
+          printAgentStart(result)
+        }
       case "status":
         guard args.isEmpty else {
           throw CLIError(message: "Unexpected agent status arguments: \(args.joined(separator: " "))", code: "unexpected_arguments", exitCode: 2, json: json)
@@ -450,11 +468,90 @@ struct Command {
         } else {
           printAgentTask(task)
         }
+      case "review":
+        guard let query = args.first else {
+          throw CLIError(message: "Missing agent task id.", code: "missing_agent_task", exitCode: 2, json: json)
+        }
+        guard args.count == 1 else {
+          throw CLIError(message: "Unexpected agent review arguments: \(args.dropFirst().joined(separator: " "))", code: "unexpected_arguments", exitCode: 2, json: json)
+        }
+        let result = try executor.review(taskQuery: query)
+        if json {
+          writeJSON(result)
+        } else {
+          printAgentReview(result)
+        }
+        if !result.ok {
+          exit(1)
+        }
+      case "mark":
+        guard args.count >= 2 else {
+          throw CLIError(message: "Missing agent mark arguments.", code: "missing_agent_mark_arguments", exitCode: 2, json: json)
+        }
+        let query = args.removeFirst()
+        let stateValue = args.removeFirst()
+        guard let state = AgentState(rawValue: stateValue) else {
+          throw CLIError(message: "Invalid agent state: \(stateValue)", code: "invalid_agent_state", exitCode: 2, json: json)
+        }
+        let note = args.isEmpty ? nil : args.joined(separator: " ")
+        let result = try executor.mark(taskQuery: query, state: state, note: note)
+        if json {
+          writeJSON(result)
+        } else {
+          print(result.message)
+          if let note = result.snapshot.record.note, !note.isEmpty {
+            print("Note: \(note)")
+          }
+        }
+      case "clean":
+        let force = consumeFlag("--force", from: &args)
+        guard let query = args.first else {
+          throw CLIError(message: "Missing agent task id.", code: "missing_agent_task", exitCode: 2, json: json)
+        }
+        guard args.count == 1 else {
+          throw CLIError(message: "Unexpected agent clean arguments: \(args.dropFirst().joined(separator: " "))", code: "unexpected_arguments", exitCode: 2, json: json)
+        }
+        let plan = try executor.cleanPlan(taskQuery: query, force: force)
+        let confirmation = try readAgentCleanConfirmation(plan: plan, json: json)
+        let result = try executor.clean(plan: plan, confirmation: confirmation)
+        if json {
+          writeJSON(result)
+        } else {
+          print(result.message)
+        }
+      case "attach":
+        guard let query = args.first else {
+          throw CLIError(message: "Missing agent task id.", code: "missing_agent_task", exitCode: 2, json: json)
+        }
+        guard args.count == 1 else {
+          throw CLIError(message: "Unexpected agent attach arguments: \(args.dropFirst().joined(separator: " "))", code: "unexpected_arguments", exitCode: 2, json: json)
+        }
+        let result = try executor.attach(taskQuery: query)
+        if json {
+          writeJSON(result)
+        } else {
+          print(result.message)
+        }
+      case "focus":
+        guard let query = args.first else {
+          throw CLIError(message: "Missing agent task id.", code: "missing_agent_task", exitCode: 2, json: json)
+        }
+        guard args.count == 1 else {
+          throw CLIError(message: "Unexpected agent focus arguments: \(args.dropFirst().joined(separator: " "))", code: "unexpected_arguments", exitCode: 2, json: json)
+        }
+        let result = try executor.focus(taskQuery: query)
+        if json {
+          writeJSON(result)
+        } else {
+          print(result.message)
+        }
       default:
         throw CLIError(message: "Unknown agent subcommand: \(subcommand)", code: "unknown_agent_subcommand", exitCode: 2, json: json)
       }
     } catch let error as AgentStateStoreError {
       throw CLIError(message: error.localizedDescription, code: "agent_state_error", exitCode: 1, json: json)
+    } catch let error as AgentWorkflowError {
+      throw CLIError(message: error.localizedDescription, code: "agent_workflow_error", exitCode: 1, json: json)
     }
   }
 
@@ -595,8 +692,14 @@ func printHelp() {
       maestro layout list [--json]
       maestro layout plan <layout> [--screen active|main] [--json]
       maestro layout apply <layout> [--screen active|main] [--json]
+      maestro agent start <repo|repo-path> <task-slug> [prompt] [--json]
       maestro agent status [--json]
       maestro agent show <task-id> [--json]
+      maestro agent review <task-id> [--json]
+      maestro agent mark <task-id> <queued|running|needs-input|review|merged|abandoned> [note] [--json]
+      maestro agent clean [--force] <task-id> [--json]
+      maestro agent attach <task-id>
+      maestro agent focus <task-id>
       maestro diagnostics [--json]
     """
   )
@@ -642,6 +745,9 @@ func printActionPlan(_ plan: ActionExecutionPlan) {
       print("  tmux: \(commandPlan.tmuxPane)")
       print("  command: \(commandPlan.displayCommand)")
     }
+    if let agentPlan = step.agentCommandPlan {
+      print("  command: \(agentPlan.displayCommand)")
+    }
   }
   if plan.steps.isEmpty {
     for reason in plan.blockedReasons {
@@ -671,6 +777,34 @@ func printAgentStatus(_ tasks: [AgentTaskSnapshot], stateDirectory: String) {
       worktree: record.worktreePath
     ))
   }
+}
+
+func printAgentStart(_ result: AgentStartResult) {
+  let record = result.snapshot.record
+  for warning in result.warnings {
+    FileHandle.standardError.write(Data("agent: warning: \(warning)\n".utf8))
+  }
+  print("Task: \(record.id)")
+  print("Repo: \(record.repoPath)")
+  print("Branch: \(record.branch)")
+  print("Worktree: \(record.worktreePath)")
+  print("Registry: \(result.snapshot.recordPath)")
+  if result.plan.launchSkipped {
+    print("Launch: skipped by AGENT_START_NO_LAUNCH")
+  } else {
+    print("tmux: \(record.tmuxSession ?? "") / \(record.tmuxWindow ?? "")")
+  }
+}
+
+func printAgentReview(_ result: AgentReviewResult) {
+  print("Review artifact: \(result.artifactPath)")
+  if let checkExit = result.checkExit {
+    print("Check exit: \(checkExit)")
+  } else {
+    print("Check exit: none")
+  }
+  print("Codex review exit: \(result.reviewExit)")
+  print("State: \(result.snapshot.record.state.rawValue)")
 }
 
 func printAgentTask(_ task: AgentTaskSnapshot) {
@@ -709,6 +843,30 @@ func printAgentTask(_ task: AgentTaskSnapshot) {
     print("Review artifact: none")
   }
   print("Record: \(task.recordPath)")
+}
+
+func readAgentCleanConfirmation(
+  plan: AgentCleanPlan,
+  json: Bool
+) throws -> AgentCleanConfirmation {
+  if plan.requiresExactConfirmation {
+    FileHandle.standardError.write(Data("\(plan.prompt)\nType \"\(plan.exactConfirmation)\" to continue: ".utf8))
+    guard let answer = readLine() else {
+      throw CLIError(message: "Missing cleanup confirmation.", code: "missing_cleanup_confirmation", exitCode: 1, json: json)
+    }
+    return .exact(answer)
+  }
+
+  FileHandle.standardError.write(Data("\(plan.prompt) [y/N] ".utf8))
+  guard let answer = readLine() else {
+    throw CLIError(message: "Missing cleanup confirmation.", code: "missing_cleanup_confirmation", exitCode: 1, json: json)
+  }
+  switch answer {
+  case "y", "Y", "yes", "YES":
+    return .yes
+  default:
+    throw CLIError(message: "aborted", code: "cleanup_aborted", exitCode: 1, json: json)
+  }
 }
 
 func trunc(_ value: String, width: Int) -> String {

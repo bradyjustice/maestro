@@ -95,6 +95,7 @@ final class DashboardModel: ObservableObject {
   @Published var runningActionID: String?
   @Published var loadError: String?
   @Published var agentLoadError: String?
+  @Published var agentActionStatus: DashboardActionStatus?
 
   private let pathResolver = RepoPathResolver()
   private let environment = ProcessInfo.processInfo.environment
@@ -250,7 +251,7 @@ final class DashboardModel: ObservableObject {
     case .commandRun:
       return "Run the command if it is safe, local, modeled with argv, and uses a supported tmux behavior."
     case .agent:
-      return "Agent execution is visible in bundles but is not supported yet."
+      return "Run the configured safe local agent command."
     case .bundle:
       return "Run the expanded bundle steps in order."
     }
@@ -343,6 +344,113 @@ final class DashboardModel: ObservableObject {
       agentLoadError = error.localizedDescription
     }
   }
+
+  func reviewSelectedAgent() {
+    guard let task = selectedAgentTask else {
+      agentActionStatus = .failed("No agent task is selected.")
+      return
+    }
+    agentActionStatus = .running("Reviewing \(task.record.id)...")
+    let environment = environment
+    let catalog = catalog
+    Task {
+      let result = await Task.detached(priority: .userInitiated) { () -> (success: Bool, message: String) in
+        do {
+          let executor = AgentWorkflowExecutor(catalog: catalog, environment: environment)
+          let review = try executor.review(taskQuery: task.record.id)
+          return (review.ok, review.message)
+        } catch {
+          return (false, error.localizedDescription)
+        }
+      }.value
+      agentActionStatus = result.success ? .succeeded(result.message) : .failed(result.message)
+      refreshAgents()
+    }
+  }
+
+  func markSelectedAgent(_ state: AgentState) {
+    guard let task = selectedAgentTask else {
+      agentActionStatus = .failed("No agent task is selected.")
+      return
+    }
+    do {
+      let result = try AgentWorkflowExecutor(catalog: catalog, environment: environment)
+        .mark(taskQuery: task.record.id, state: state, note: "Marked \(state.rawValue) from Maestro.")
+      agentActionStatus = .succeeded(result.message)
+      refreshAgents()
+    } catch {
+      agentActionStatus = .failed(error.localizedDescription)
+    }
+  }
+
+  func attachSelectedAgent() {
+    guard let task = selectedAgentTask else {
+      agentActionStatus = .failed("No agent task is selected.")
+      return
+    }
+    agentActionStatus = .running("Attach \(task.record.id)...")
+    let environment = environment
+    Task {
+      let result = await Task.detached(priority: .userInitiated) { () -> (success: Bool, message: String) in
+        do {
+          let executor = AgentWorkflowExecutor(environment: environment)
+          return (true, try executor.attach(taskQuery: task.record.id).message)
+        } catch {
+          return (false, error.localizedDescription)
+        }
+      }.value
+      agentActionStatus = result.success ? .succeeded(result.message) : .failed(result.message)
+      refreshAgents()
+    }
+  }
+
+  func focusSelectedAgent() {
+    guard let task = selectedAgentTask else {
+      agentActionStatus = .failed("No agent task is selected.")
+      return
+    }
+    agentActionStatus = .running("Focus \(task.record.id)...")
+    let environment = environment
+    Task {
+      let result = await Task.detached(priority: .userInitiated) { () -> (success: Bool, message: String) in
+        do {
+          let executor = AgentWorkflowExecutor(environment: environment)
+          return (true, try executor.focus(taskQuery: task.record.id).message)
+        } catch {
+          return (false, error.localizedDescription)
+        }
+      }.value
+      agentActionStatus = result.success ? .succeeded(result.message) : .failed(result.message)
+      refreshAgents()
+    }
+  }
+
+  func cleanSelectedAgent() {
+    guard let task = selectedAgentTask else {
+      agentActionStatus = .failed("No agent task is selected.")
+      return
+    }
+    agentActionStatus = .running("Cleaning \(task.record.id)...")
+    let environment = environment
+    Task {
+      let result = await Task.detached(priority: .userInitiated) { () -> (success: Bool, message: String) in
+        do {
+          let executor = AgentWorkflowExecutor(environment: environment)
+          let plan = try executor.cleanPlan(taskQuery: task.record.id, force: false)
+          guard !plan.requiresExactConfirmation else {
+            return (false, "Dirty cleanup requires the CLI exact-confirmation flow.")
+          }
+          let clean = try executor.clean(plan: plan, confirmation: .trustedCleanOnly)
+          return (true, clean.message)
+        } catch {
+          return (false, error.localizedDescription)
+        }
+      }.value
+      agentActionStatus = result.success ? .succeeded(result.message) : .failed(result.message)
+      refreshAgents()
+    }
+  }
+
 
   func applySelectedLayout() {
     guard let layout = selectedLayout else {
@@ -732,6 +840,7 @@ struct DetailPane: View {
 
         if let agentTask = model.selectedAgentTask {
           DetailSection(title: agentTask.record.id, systemImage: "person.crop.rectangle.stack") {
+            AgentControls(model: model, task: agentTask)
             AgentDetail(task: agentTask)
           }
         }
@@ -1321,6 +1430,63 @@ struct AgentStateBadge: View {
     case .abandoned:
       return Color.gray.opacity(0.18)
     }
+  }
+}
+
+struct AgentControls: View {
+  @ObservedObject var model: DashboardModel
+  var task: AgentTaskSnapshot
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      HStack(spacing: 8) {
+        Button {
+          model.reviewSelectedAgent()
+        } label: {
+          Label("Review", systemImage: "doc.text.magnifyingglass")
+        }
+
+        Menu {
+          ForEach(AgentState.allCases, id: \.rawValue) { state in
+            Button(state.rawValue) {
+              model.markSelectedAgent(state)
+            }
+          }
+        } label: {
+          Label("Mark", systemImage: "tag")
+        }
+
+        Button {
+          model.attachSelectedAgent()
+        } label: {
+          Label("Attach", systemImage: "terminal")
+        }
+        .disabled(task.record.tmuxSession?.isEmpty ?? true)
+
+        Button {
+          model.focusSelectedAgent()
+        } label: {
+          Label("Focus", systemImage: "scope")
+        }
+        .disabled(task.record.tmuxSession?.isEmpty ?? true)
+
+        Button(role: .destructive) {
+          model.cleanSelectedAgent()
+        } label: {
+          Label("Clean", systemImage: "archivebox")
+        }
+        .disabled(task.record.state != .merged && task.record.state != .abandoned)
+
+        Spacer()
+      }
+      .controlSize(.small)
+
+      if let status = model.agentActionStatus {
+        ActionStatusLine(status: status)
+      }
+    }
+
+    Divider()
   }
 }
 

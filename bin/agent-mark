@@ -2,36 +2,4 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=agent-lib
-source "$script_dir/agent-lib"
-
-usage() {
-  printf 'Usage: agent-mark <task> <queued|running|needs-input|review|merged|abandoned> [note]\n' >&2
-  exit 2
-}
-
-[[ $# -ge 2 ]] || usage
-
-task_query="$1"
-new_state="$2"
-shift 2
-new_note="${*:-}"
-
-agent_valid_state "$new_state" || agent_die "invalid state: $new_state"
-
-task_file="$(agent_find_task_file "$task_query")"
-agent_load_task "$task_file"
-
-state="$new_state"
-updated_at="$(agent_timestamp)"
-if [[ -n "$new_note" ]]; then
-  note="$new_note"
-fi
-
-agent_write_task_file "$task_file"
-
-printf 'Updated %s: %s\n' "${task_id:-$task_query}" "$state"
-if [[ -n "${note:-}" ]]; then
-  printf 'Note: %s\n' "$note"
-fi
-
+exec "$script_dir/maestro" agent mark "$@"

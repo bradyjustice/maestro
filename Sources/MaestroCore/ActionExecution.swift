@@ -45,6 +45,7 @@ public struct ActionExecutionStep: Codable, Identifiable, Equatable, Sendable {
   public var bundleID: String?
   public var repoOpenPlan: RepoOpenPlan?
   public var commandRunPlan: CommandRunPlan?
+  public var agentCommandPlan: AgentCommandPlan?
 
   public init(
     id: String = "",
@@ -62,7 +63,8 @@ public struct ActionExecutionStep: Codable, Identifiable, Equatable, Sendable {
     layoutID: String? = nil,
     bundleID: String? = nil,
     repoOpenPlan: RepoOpenPlan? = nil,
-    commandRunPlan: CommandRunPlan? = nil
+    commandRunPlan: CommandRunPlan? = nil,
+    agentCommandPlan: AgentCommandPlan? = nil
   ) {
     self.id = id
     self.index = index
@@ -80,6 +82,7 @@ public struct ActionExecutionStep: Codable, Identifiable, Equatable, Sendable {
     self.bundleID = bundleID
     self.repoOpenPlan = repoOpenPlan
     self.commandRunPlan = commandRunPlan
+    self.agentCommandPlan = agentCommandPlan
   }
 
   public func indexed(_ index: Int) -> ActionExecutionStep {
@@ -87,6 +90,18 @@ public struct ActionExecutionStep: Codable, Identifiable, Equatable, Sendable {
     copy.index = index
     copy.id = "\(index + 1).\(actionID)"
     return copy
+  }
+}
+
+public struct AgentCommandPlan: Codable, Equatable, Sendable {
+  public var commandID: String
+  public var argv: [String]
+  public var displayCommand: String
+
+  public init(commandID: String, argv: [String], displayCommand: String) {
+    self.commandID = commandID
+    self.argv = argv
+    self.displayCommand = displayCommand
   }
 }
 
@@ -339,10 +354,53 @@ public struct ActionExecutionPlanner: Sendable {
       }
       return baseStep(for: action, runnable: true)
     case .agent:
-      return blockedStep(for: action, reason: "Agent action execution is not supported in executable bundles yet.")
+      return agentStep(for: action)
     case .bundle:
       return blockedStep(for: action, reason: "Nested bundle action did not expand.")
     }
+  }
+
+  private func agentStep(for action: ActionDefinition) -> ActionExecutionStep {
+    guard let commandID = action.commandID else {
+      return blockedStep(for: action, reason: "No agent command target is configured for this action.")
+    }
+    guard let command = command(named: commandID) else {
+      return blockedStep(for: action, reason: "The configured agent command target is not in the catalog.")
+    }
+    guard command.risk == .safe && action.risk == .safe else {
+      return blockedStep(for: action, reason: "Only safe local agent commands can run from actions.")
+    }
+    guard command.confirmation == .none && action.confirmation == .none else {
+      return blockedStep(for: action, reason: "Only agent commands with no confirmation requirement can run from actions.")
+    }
+    guard command.environment == .local else {
+      return blockedStep(for: action, reason: "Only local agent command targets can run from actions.")
+    }
+    guard command.behavior == .foreground else {
+      return blockedStep(for: action, reason: "Unsupported agent command behavior: \(command.behavior.rawValue).")
+    }
+    guard let argv = command.argv, !argv.isEmpty else {
+      return blockedStep(for: action, reason: "The agent command does not have a modeled argv.")
+    }
+
+    return ActionExecutionStep(
+      actionID: action.id,
+      label: action.label,
+      description: action.description,
+      type: action.type,
+      risk: action.risk,
+      confirmation: action.confirmation,
+      runnable: true,
+      repoKey: action.repoKey,
+      commandID: command.id,
+      layoutID: action.layoutID,
+      bundleID: action.bundleID,
+      agentCommandPlan: AgentCommandPlan(
+        commandID: command.id,
+        argv: argv,
+        displayCommand: Self.commandLine(from: argv)
+      )
+    )
   }
 
   private func commandStep(for action: ActionDefinition) -> ActionExecutionStep {

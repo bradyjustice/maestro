@@ -6,6 +6,7 @@ public struct ActionExecutionExecutor {
   public var environment: [String: String]
   public var pathResolver: RepoPathResolver
   public var runner: CommandRunning
+  public var foregroundRunner: ForegroundCommandRunning
   public var fileManager: FileManager
   public var layoutAutomation: any LayoutAutomation
   public var screenSelection: LayoutScreenSelection
@@ -16,6 +17,7 @@ public struct ActionExecutionExecutor {
     environment: [String: String] = ProcessInfo.processInfo.environment,
     pathResolver: RepoPathResolver? = nil,
     runner: CommandRunning = ProcessCommandRunner(),
+    foregroundRunner: ForegroundCommandRunning = ProcessForegroundCommandRunner(),
     fileManager: FileManager = .default,
     layoutAutomation: any LayoutAutomation = NativeMacAutomation(),
     screenSelection: LayoutScreenSelection = .active,
@@ -25,6 +27,7 @@ public struct ActionExecutionExecutor {
     self.environment = environment
     self.pathResolver = pathResolver ?? RepoPathResolver(environment: environment)
     self.runner = runner
+    self.foregroundRunner = foregroundRunner
     self.fileManager = fileManager
     self.layoutAutomation = layoutAutomation
     self.screenSelection = screenSelection
@@ -206,7 +209,29 @@ public struct ActionExecutionExecutor {
       let result = try layoutAutomation.applyLayout(plan)
       return layoutResultMessage(layoutLabel: layout.label, result: result)
     case .agent:
-      throw ActionExecutionExecutorError.unsupportedAction(step.actionID)
+      guard let plan = step.agentCommandPlan else {
+        throw ActionExecutionExecutorError.missingStepPlan(step.actionID)
+      }
+      if plan.commandID == "agent.status" {
+        let store = AgentStateStore(
+          stateDirectory: MaestroPaths.defaultStateDirectory(environment: environment),
+          environment: environment,
+          fileManager: fileManager
+        )
+        let tasks = try store.list(includeArchived: false)
+        return tasks.isEmpty ? "No active agent tasks." : "Found \(tasks.count) active agent task(s)."
+      }
+
+      let result = try foregroundRunner.run(ForegroundCommand(
+        executable: plan.argv[0],
+        arguments: Array(plan.argv.dropFirst()),
+        environment: environment
+      ))
+      guard result.status == 0 else {
+        throw ActionExecutionExecutorError.commandFailed(step.actionID, result.status)
+      }
+      let trimmed = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+      return trimmed.isEmpty ? "Ran \(plan.displayCommand)." : trimmed
     case .bundle:
       throw ActionExecutionExecutorError.unsupportedAction(step.actionID)
     }

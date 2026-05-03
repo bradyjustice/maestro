@@ -13,8 +13,16 @@ sample_root="$tmp/node"
 sample_repo="$sample_root/sample"
 worktree_root="$tmp/worktrees"
 registry_dir="$worktree_root/_registry"
+state_dir="$tmp/maestro-state"
+agent_fake_bin="$tmp/agent-bin"
 
-mkdir -p "$sample_root"
+mkdir -p "$sample_root" "$agent_fake_bin"
+cat > "$agent_fake_bin/codex" <<'CODEX'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'fake codex %s\n' "$*"
+CODEX
+chmod +x "$agent_fake_bin/codex"
 git init -b main "$sample_repo" >/dev/null
 git -C "$sample_repo" config user.email "smoke@example.invalid"
 git -C "$sample_repo" config user.name "Maestro Smoke"
@@ -25,30 +33,74 @@ git -C "$sample_repo" commit -m "Initial commit" >/dev/null
 AGENT_NODE_ROOT="$sample_root" \
 AGENT_WORKTREE_ROOT="$worktree_root" \
 AGENT_REGISTRY_DIR="$registry_dir" \
+MAESTRO_STATE_DIR="$state_dir" \
 AGENT_START_NO_LAUNCH=1 \
   "$repo_root/bin/agent-start" sample smoke-test "Smoke prompt" >/dev/null
 
 task_id="sample-$(date '+%Y%m%d')-smoke-test"
 
-AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/agent-status" >/dev/null
-MAESTRO_STATE_DIR="$tmp/maestro-state" AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/maestro" agent status --json > "$tmp/maestro-agent-status.json"
-if ! grep -q "\"id\" : \"$task_id\"" "$tmp/maestro-agent-status.json" || ! grep -q '"source" : "legacy"' "$tmp/maestro-agent-status.json"; then
-  printf 'Expected maestro agent status JSON to include the legacy task; saw:\n' >&2
+MAESTRO_STATE_DIR="$state_dir" AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/agent-status" >/dev/null
+MAESTRO_STATE_DIR="$state_dir" AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/maestro" agent status --json > "$tmp/maestro-agent-status.json"
+if ! grep -q "\"id\" : \"$task_id\"" "$tmp/maestro-agent-status.json" || ! grep -q '"source" : "swift"' "$tmp/maestro-agent-status.json"; then
+  printf 'Expected maestro agent status JSON to include the Swift task; saw:\n' >&2
   cat "$tmp/maestro-agent-status.json" >&2
   exit 1
 fi
 if grep -q 'Smoke prompt' "$tmp/maestro-agent-status.json" || grep -q '"prompt"' "$tmp/maestro-agent-status.json"; then
-  printf 'Expected maestro agent status JSON to omit legacy prompts; saw:\n' >&2
+  printf 'Expected maestro agent status JSON to omit prompts; saw:\n' >&2
   cat "$tmp/maestro-agent-status.json" >&2
   exit 1
 fi
 
-AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/agent-mark" "$task_id" abandoned "Smoke complete" >/dev/null
-printf 'y\n' | AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/agent-clean" "$task_id" >/dev/null
-MAESTRO_STATE_DIR="$tmp/maestro-state" AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/maestro" agent show "$task_id" --json > "$tmp/maestro-agent-show.json"
+PATH="$agent_fake_bin:$PATH" MAESTRO_STATE_DIR="$state_dir" AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/agent-review" "$task_id" >/dev/null
+MAESTRO_STATE_DIR="$state_dir" AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/maestro" agent show "$task_id" --json > "$tmp/maestro-agent-reviewed.json"
+review_artifact="$(grep '"reviewArtifact"' "$tmp/maestro-agent-reviewed.json" | head -n 1 | sed 's/.*: "\(.*\)",/\1/')"
+if [[ ! -f "$review_artifact" ]] || ! grep -q 'No check command found\.' "$review_artifact"; then
+  printf 'Expected agent-review to write a no-check review artifact; saw:\n' >&2
+  cat "$tmp/maestro-agent-reviewed.json" >&2
+  [[ -f "${review_artifact:-}" ]] && cat "$review_artifact" >&2
+  exit 1
+fi
+
+MAESTRO_STATE_DIR="$state_dir" AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/agent-mark" "$task_id" abandoned "Smoke complete" >/dev/null
+printf 'y\n' | MAESTRO_STATE_DIR="$state_dir" AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/agent-clean" "$task_id" >/dev/null
+MAESTRO_STATE_DIR="$state_dir" AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/maestro" agent show "$task_id" --json > "$tmp/maestro-agent-show.json"
 if ! grep -q "\"id\" : \"$task_id\"" "$tmp/maestro-agent-show.json" || ! grep -q '"archived" : true' "$tmp/maestro-agent-show.json"; then
-  printf 'Expected maestro agent show JSON to include the archived legacy task; saw:\n' >&2
+  printf 'Expected maestro agent show JSON to include the archived Swift task; saw:\n' >&2
   cat "$tmp/maestro-agent-show.json" >&2
+  exit 1
+fi
+
+legacy_task_id="sample-20260102-legacy"
+mkdir -p "$registry_dir"
+cat > "$registry_dir/$legacy_task_id.env" <<LEGACY
+task_id=$legacy_task_id
+repo_name=sample
+repo_path=$sample_repo
+worktree_path=
+branch=agent/20260102-legacy
+base_ref=main
+state=running
+created_at=2026-01-02T00:00:00Z
+updated_at=2026-01-02T00:00:00Z
+prompt=legacy-secret
+LEGACY
+MAESTRO_STATE_DIR="$state_dir" AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/maestro" agent status --json > "$tmp/maestro-agent-legacy-status.json"
+if ! grep -q "\"id\" : \"$legacy_task_id\"" "$tmp/maestro-agent-legacy-status.json" || ! grep -q '"source" : "legacy"' "$tmp/maestro-agent-legacy-status.json"; then
+  printf 'Expected maestro agent status JSON to include the legacy task; saw:\n' >&2
+  cat "$tmp/maestro-agent-legacy-status.json" >&2
+  exit 1
+fi
+if grep -q 'legacy-secret' "$tmp/maestro-agent-legacy-status.json"; then
+  printf 'Expected maestro agent status JSON to omit legacy prompt secrets; saw:\n' >&2
+  cat "$tmp/maestro-agent-legacy-status.json" >&2
+  exit 1
+fi
+MAESTRO_STATE_DIR="$state_dir" AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/agent-mark" "$legacy_task_id" abandoned "Legacy complete" >/dev/null
+printf 'y\n' | MAESTRO_STATE_DIR="$state_dir" AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/agent-clean" "$legacy_task_id" >/dev/null
+if [[ ! -f "$registry_dir/archive/$legacy_task_id.env" ]] || grep -q 'legacy-secret' "$registry_dir/archive/$legacy_task_id.env"; then
+  printf 'Expected legacy clean to archive a prompt-free env file; saw:\n' >&2
+  [[ -f "$registry_dir/archive/$legacy_task_id.env" ]] && cat "$registry_dir/archive/$legacy_task_id.env" >&2
   exit 1
 fi
 
@@ -82,7 +134,9 @@ fi
 "$repo_root/bin/maestro" action run bundle.backend.cockpit.run --dry-run --json > "$tmp/maestro-backend-bundle-plan.json"
 "$repo_root/bin/maestro" action run bundle.frontend.cockpit.run --dry-run --json > "$tmp/maestro-frontend-bundle-plan.json"
 "$repo_root/bin/maestro" action run layout.terminal.stack.apply --dry-run --json > "$tmp/maestro-layout-action-plan.json"
-"$repo_root/bin/maestro" action run agent.status.show --dry-run --json > "$tmp/maestro-blocked-action-plan.json"
+"$repo_root/bin/maestro" action run agent.status.show --dry-run --json > "$tmp/maestro-agent-action-plan.json"
+"$repo_root/bin/maestro" action run bundle.agent.reviewLoop.run --dry-run --json > "$tmp/maestro-agent-review-loop-plan.json"
+MAESTRO_STATE_DIR="$state_dir" AGENT_REGISTRY_DIR="$registry_dir" "$repo_root/bin/maestro" action run agent.status.show --json > "$tmp/maestro-agent-action-run.json"
 "$repo_root/bin/maestro" work dev all shell --dry-run --json > "$tmp/maestro-work-dev.json"
 "$repo_root/bin/maestro" layout list --json > "$tmp/maestro-layouts.json"
 "$repo_root/bin/maestro" layout plan terminal.quad --screen main --json > "$tmp/maestro-layout-plan.json"
@@ -136,9 +190,21 @@ if ! grep -q '"actionID" : "layout.terminal.stack.apply"' "$tmp/maestro-layout-a
   exit 1
 fi
 
-if ! grep -q '"runnable" : false' "$tmp/maestro-blocked-action-plan.json" || ! grep -q 'Agent action execution is not supported' "$tmp/maestro-blocked-action-plan.json"; then
-  printf 'Expected blocked action dry-run JSON to include a readable blocked state; saw:\n' >&2
-  cat "$tmp/maestro-blocked-action-plan.json" >&2
+if ! grep -q '"actionID" : "agent.status.show"' "$tmp/maestro-agent-action-plan.json" || ! grep -q '"runnable" : true' "$tmp/maestro-agent-action-plan.json" || grep -q 'Agent action execution is not supported' "$tmp/maestro-agent-action-plan.json"; then
+  printf 'Expected agent status action dry-run JSON to be runnable; saw:\n' >&2
+  cat "$tmp/maestro-agent-action-plan.json" >&2
+  exit 1
+fi
+
+if ! grep -q '"actionID" : "bundle.agent.reviewLoop.run"' "$tmp/maestro-agent-review-loop-plan.json" || ! grep -q '"actionID" : "agent.status.show"' "$tmp/maestro-agent-review-loop-plan.json" || grep -q 'Agent action execution is not supported' "$tmp/maestro-agent-review-loop-plan.json"; then
+  printf 'Expected agent review loop dry-run JSON to omit the unsupported-agent blocked reason; saw:\n' >&2
+  cat "$tmp/maestro-agent-review-loop-plan.json" >&2
+  exit 1
+fi
+
+if ! grep -q '"ok" : true' "$tmp/maestro-agent-action-run.json" || ! grep -q 'agent.status.show' "$tmp/maestro-agent-action-run.json"; then
+  printf 'Expected agent status action execution to succeed; saw:\n' >&2
+  cat "$tmp/maestro-agent-action-run.json" >&2
   exit 1
 fi
 

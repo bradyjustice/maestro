@@ -252,6 +252,39 @@ public protocol CommandRunning {
   func run(_ command: TmuxCommand) throws -> Int32
 }
 
+public struct ForegroundCommand: Equatable, Sendable {
+  public var executable: String
+  public var arguments: [String]
+  public var currentDirectoryPath: String?
+  public var environment: [String: String]?
+
+  public init(
+    executable: String,
+    arguments: [String] = [],
+    currentDirectoryPath: String? = nil,
+    environment: [String: String]? = nil
+  ) {
+    self.executable = executable
+    self.arguments = arguments
+    self.currentDirectoryPath = currentDirectoryPath
+    self.environment = environment
+  }
+}
+
+public struct ForegroundCommandResult: Equatable, Sendable {
+  public var status: Int32
+  public var output: String
+
+  public init(status: Int32, output: String) {
+    self.status = status
+    self.output = output
+  }
+}
+
+public protocol ForegroundCommandRunning {
+  func run(_ command: ForegroundCommand) throws -> ForegroundCommandResult
+}
+
 public struct ProcessCommandRunner: CommandRunning {
   public init() {}
 
@@ -263,6 +296,34 @@ public struct ProcessCommandRunner: CommandRunning {
     try process.run()
     process.waitUntilExit()
     return process.terminationStatus
+  }
+}
+
+public struct ProcessForegroundCommandRunner: ForegroundCommandRunning {
+  public init() {}
+
+  public func run(_ command: ForegroundCommand) throws -> ForegroundCommandResult {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = [command.executable] + command.arguments
+    if let currentDirectoryPath = command.currentDirectoryPath {
+      process.currentDirectoryURL = URL(fileURLWithPath: currentDirectoryPath)
+    }
+    if let environment = command.environment {
+      process.environment = environment
+    }
+
+    let output = Pipe()
+    process.standardOutput = output
+    process.standardError = output
+    try process.run()
+    process.waitUntilExit()
+
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    return ForegroundCommandResult(
+      status: process.terminationStatus,
+      output: String(data: data, encoding: .utf8) ?? ""
+    )
   }
 }
 

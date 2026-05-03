@@ -2,36 +2,4 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=agent-lib
-source "$script_dir/agent-lib"
-
-agent_ensure_registry
-
-shopt -s nullglob
-files=( "$AGENT_REGISTRY_DIR"/*.env )
-shopt -u nullglob
-
-if (( ${#files[@]} == 0 )); then
-  printf 'No active agent tasks in %s\n' "$AGENT_REGISTRY_DIR"
-  exit 0
-fi
-
-printf '%-36s %-12s %-20s %-26s %-28s %s\n' 'TASK' 'STATE' 'UPDATED' 'BRANCH' 'DIFF' 'NEXT'
-printf '%-36s %-12s %-20s %-26s %-28s %s\n' '----' '-----' '-------' '------' '----' '----'
-
-for file in "${files[@]}"; do
-  unset task_id repo_name repo_path worktree_path branch base_ref state created_at updated_at prompt note review_artifact check_exit review_exit tmux_session tmux_window cleaned_at
-  agent_load_task "$file"
-
-  diff_summary="$(agent_diff_summary "${worktree_path-}" "${base_ref:-main}")"
-  next_action="$(agent_next_action "${state:-unknown}" "${check_exit-}" "${review_exit-}")"
-
-  printf '%-36s %-12s %-20s %-26s %-28s %s\n' \
-    "$(agent_trunc "${task_id:-$(basename "$file" .env)}" 36)" \
-    "$(agent_trunc "${state:-unknown}" 12)" \
-    "$(agent_trunc "${updated_at:-unknown}" 20)" \
-    "$(agent_trunc "${branch:-unknown}" 26)" \
-    "$(agent_trunc "$diff_summary" 28)" \
-    "$next_action"
-done
-
+exec "$script_dir/maestro" agent status "$@"

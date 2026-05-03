@@ -123,10 +123,7 @@ public struct AgentStateStore {
 
     if includeArchived {
       snapshots += try swiftSnapshots(in: archiveDirectory, archived: true)
-      snapshots += try legacySnapshots(
-        in: legacyRegistryDirectory.appendingPathComponent("archive"),
-        archived: true
-      )
+      snapshots += try legacySnapshots(in: legacyArchiveDirectory, archived: true)
     }
 
     return snapshots.sorted { lhs, rhs in
@@ -173,6 +170,94 @@ public struct AgentStateStore {
 
   public func writeArchived(_ record: AgentTaskRecord) throws {
     try write(record, to: archiveDirectory.appendingPathComponent("\(safeFileName(record.id)).json"))
+  }
+
+  public func activeRecordURL(for taskID: String) -> URL {
+    activeDirectory.appendingPathComponent("\(safeFileName(taskID)).json")
+  }
+
+  public func archivedRecordURL(for taskID: String) -> URL {
+    archiveDirectory.appendingPathComponent("\(safeFileName(taskID)).json")
+  }
+
+  public func activeRecordExists(taskID: String) -> Bool {
+    fileManager.fileExists(atPath: activeRecordURL(for: taskID).path)
+      || fileManager.fileExists(atPath: legacyRegistryDirectory.appendingPathComponent("\(taskID).env").path)
+  }
+
+  public func update(
+    _ snapshot: AgentTaskSnapshot,
+    with record: AgentTaskRecord
+  ) throws -> AgentTaskSnapshot {
+    let destination = URL(fileURLWithPath: snapshot.recordPath)
+    switch snapshot.source {
+    case .swift:
+      try write(record, to: destination)
+    case .legacy:
+      try writeLegacy(record, to: destination)
+    }
+
+    return AgentTaskSnapshot(
+      source: snapshot.source,
+      archived: snapshot.archived,
+      recordPath: destination.path,
+      record: record,
+      reviewArtifactAvailable: artifactExists(record.reviewArtifact)
+    )
+  }
+
+  public func archive(
+    _ snapshot: AgentTaskSnapshot,
+    with record: AgentTaskRecord
+  ) throws -> AgentTaskSnapshot {
+    switch snapshot.source {
+    case .swift:
+      let destination = archivedRecordURL(for: record.id)
+      try write(record, to: destination)
+      let source = URL(fileURLWithPath: snapshot.recordPath)
+      if source.path != destination.path, fileManager.fileExists(atPath: source.path) {
+        try fileManager.removeItem(at: source)
+      }
+      return AgentTaskSnapshot(
+        source: .swift,
+        archived: true,
+        recordPath: destination.path,
+        record: record,
+        reviewArtifactAvailable: artifactExists(record.reviewArtifact)
+      )
+    case .legacy:
+      let source = URL(fileURLWithPath: snapshot.recordPath)
+      try writeLegacy(record, to: source)
+      let destination = legacyArchiveDirectory
+        .appendingPathComponent(source.lastPathComponent)
+      try fileManager.createDirectory(
+        at: destination.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+      )
+      if fileManager.fileExists(atPath: destination.path) {
+        try fileManager.removeItem(at: destination)
+      }
+      try fileManager.moveItem(at: source, to: destination)
+      return AgentTaskSnapshot(
+        source: .legacy,
+        archived: true,
+        recordPath: destination.path,
+        record: record,
+        reviewArtifactAvailable: artifactExists(record.reviewArtifact)
+      )
+    }
+  }
+
+  public var swiftReviewsDirectory: URL {
+    agentsDirectory.appendingPathComponent("reviews")
+  }
+
+  public var legacyReviewsDirectory: URL {
+    legacyRegistryDirectory.appendingPathComponent("reviews")
+  }
+
+  public var legacyArchiveDirectory: URL {
+    legacyRegistryDirectory.appendingPathComponent("archive")
   }
 
   private func swiftSnapshots(in directory: URL, archived: Bool) throws -> [AgentTaskSnapshot] {
@@ -280,6 +365,37 @@ public struct AgentStateStore {
     guard fileManager.createFile(
       atPath: temporary.path,
       contents: data,
+      attributes: [.posixPermissions: 0o600]
+    ) else {
+      throw AgentStateStoreError.writeFailed(temporary.path)
+    }
+    try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
+
+    if fileManager.fileExists(atPath: destination.path) {
+      _ = try fileManager.replaceItemAt(
+        destination,
+        withItemAt: temporary,
+        backupItemName: nil,
+        options: [.usingNewMetadataOnly]
+      )
+      try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+    } else {
+      try fileManager.moveItem(at: temporary, to: destination)
+    }
+  }
+
+  private func writeLegacy(_ record: AgentTaskRecord, to destination: URL) throws {
+    try fileManager.createDirectory(
+      at: destination.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+
+    let temporary = destination.deletingLastPathComponent()
+      .appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString).tmp")
+    let text = LegacyAgentEnvWriter.encode(record)
+    guard fileManager.createFile(
+      atPath: temporary.path,
+      contents: Data(text.utf8),
       attributes: [.posixPermissions: 0o600]
     ) else {
       throw AgentStateStoreError.writeFailed(temporary.path)
@@ -449,6 +565,40 @@ public enum LegacyAgentEnvParser {
     default:
       output.append(character)
     }
+  }
+}
+
+public enum LegacyAgentEnvWriter {
+  public static func encode(_ record: AgentTaskRecord) -> String {
+    var lines: [String] = []
+    append("task_id", record.id, to: &lines)
+    append("repo_name", record.repoName, to: &lines)
+    append("repo_path", record.repoPath, to: &lines)
+    append("worktree_path", record.worktreePath, to: &lines)
+    append("branch", record.branch, to: &lines)
+    append("base_ref", record.baseRef, to: &lines)
+    append("state", record.state.rawValue, to: &lines)
+    append("created_at", ISO8601DateFormatter().string(from: record.createdAt), to: &lines)
+    append("updated_at", ISO8601DateFormatter().string(from: record.updatedAt), to: &lines)
+    append("note", record.note ?? "", to: &lines)
+    append("review_artifact", record.reviewArtifact ?? "", to: &lines)
+    append("check_exit", record.checkExit.map(String.init) ?? "", to: &lines)
+    append("review_exit", record.reviewExit.map(String.init) ?? "", to: &lines)
+    append("tmux_session", record.tmuxSession ?? "", to: &lines)
+    append("tmux_window", record.tmuxWindow ?? "", to: &lines)
+    append("cleaned_at", record.cleanedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "", to: &lines)
+    return lines.joined(separator: "\n") + "\n"
+  }
+
+  private static func append(_ key: String, _ value: String, to lines: inout [String]) {
+    lines.append("\(key)=\(shellQuote(value))")
+  }
+
+  private static func shellQuote(_ value: String) -> String {
+    guard !value.isEmpty else {
+      return "''"
+    }
+    return "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
   }
 }
 

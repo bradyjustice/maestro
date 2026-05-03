@@ -12,6 +12,11 @@ struct MaestroCoreChecks {
     try agentTaskRecordJSONRoundTripsAndValidatesState()
     try legacyAgentEnvRecordsNormalizeWithoutPrompts()
     try agentStateStoreWritesPrivateAtomicRecords()
+    try agentSlugValidationMatchesCompatibility()
+    try agentStateStoreUpdatesAndArchivesLegacyRecords()
+    try agentReviewWritesArtifactAndUpdatesSwiftRecord()
+    try agentCleanPlanRefusesActiveTasksAndRequiresExactForDirtyWorktrees()
+    try agentTmuxPlansTargetWindows()
     try invalidLegacyAgentStateFailsValidation()
     try repoOpenPlanMatchesCompatibilityWindows()
     try workDevTargetSelectionMatchesCompatibility()
@@ -27,7 +32,7 @@ struct MaestroCoreChecks {
     try discoveredRiskyScriptsStayBlockedUntilConfigured()
     try actionExecutionExpandsBundlesDeterministically()
     try actionExecutionCommandEligibilityIsExplicit()
-    try actionExecutionReportsBlockedBundleReasons()
+    try actionExecutionAgentStatusIsExecutable()
     try actionAuditLogWritesJSONLines()
     try catalogValidationReportsFailures()
     try jsonErrorEncodingStaysStable()
@@ -265,6 +270,214 @@ struct MaestroCoreChecks {
 
     let files = try FileManager.default.contentsOfDirectory(atPath: store.activeDirectory.path)
     try expectEqual(files, ["\(record.id).json"], "atomic write leaves only final record")
+  }
+
+  private static func agentSlugValidationMatchesCompatibility() throws {
+    try AgentSlugValidator.validate("task.slug_1-alpha")
+    do {
+      try AgentSlugValidator.validate("../nope")
+      throw CheckFailure("expected invalid agent slug to fail")
+    } catch let error as AgentWorkflowError {
+      try expectEqual(error, .invalidSlug("../nope"), "invalid slug error")
+    }
+  }
+
+  private static func agentStateStoreUpdatesAndArchivesLegacyRecords() throws {
+    let tempRoot = FileManager.default.temporaryDirectory
+      .appendingPathComponent("maestro-agent-legacy-update-\(UUID().uuidString)")
+    defer {
+      try? FileManager.default.removeItem(at: tempRoot)
+    }
+
+    let registry = tempRoot.appendingPathComponent("_registry")
+    try FileManager.default.createDirectory(at: registry, withIntermediateDirectories: true)
+    let recordFile = registry.appendingPathComponent("sample-20260101-task.env")
+    try """
+    task_id=sample-20260101-task
+    repo_name=sample
+    repo_path=/tmp/sample
+    worktree_path=/tmp/worktrees/sample
+    branch=agent/20260101-task
+    base_ref=main
+    state=running
+    created_at=2026-01-01T00:00:00Z
+    updated_at=2026-01-01T00:00:00Z
+    prompt=legacy-secret
+    """.write(to: recordFile, atomically: true, encoding: .utf8)
+
+    let store = AgentStateStore(
+      stateDirectory: tempRoot.appendingPathComponent("state"),
+      environment: ["AGENT_REGISTRY_DIR": registry.path]
+    )
+    let snapshot = try store.task(matching: "sample-20260101-task", includeArchived: false)
+    var record = snapshot.record
+    record.state = .abandoned
+    record.note = "Done"
+    record.updatedAt = Date(timeIntervalSince1970: 60)
+    let updated = try store.update(snapshot, with: record)
+
+    try expectEqual(updated.source, .legacy, "updated legacy source")
+    let updatedText = try String(contentsOf: recordFile, encoding: .utf8)
+    try expect(updatedText.contains("state='abandoned'"), "legacy update writes state")
+    try expect(updatedText.contains("note='Done'"), "legacy update writes note")
+    try expect(!updatedText.contains("legacy-secret"), "legacy update does not serialize prompt")
+
+    record.cleanedAt = Date(timeIntervalSince1970: 120)
+    let archived = try store.archive(updated, with: record)
+    try expectEqual(archived.archived, true, "legacy archive snapshot is archived")
+    try expect(!FileManager.default.fileExists(atPath: recordFile.path), "legacy active file moved")
+    try expect(
+      FileManager.default.fileExists(atPath: registry.appendingPathComponent("archive/sample-20260101-task.env").path),
+      "legacy archive file exists"
+    )
+  }
+
+  private static func agentReviewWritesArtifactAndUpdatesSwiftRecord() throws {
+    let tempRoot = FileManager.default.temporaryDirectory
+      .appendingPathComponent("maestro-agent-review-\(UUID().uuidString)")
+    defer {
+      try? FileManager.default.removeItem(at: tempRoot)
+    }
+
+    let repo = tempRoot.appendingPathComponent("sample")
+    let worktree = tempRoot.appendingPathComponent("worktree")
+    let fakeBin = tempRoot.appendingPathComponent("bin")
+    try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: fakeBin, withIntermediateDirectories: true)
+    let codex = fakeBin.appendingPathComponent("codex")
+    try "#!/usr/bin/env bash\n".write(to: codex, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: codex.path)
+
+    let store = AgentStateStore(
+      stateDirectory: tempRoot.appendingPathComponent("state"),
+      environment: ["PATH": fakeBin.path]
+    )
+    let record = AgentTaskRecord(
+      id: "sample-20260101-task",
+      repoName: "sample",
+      repoPath: repo.path,
+      worktreePath: worktree.path,
+      branch: "agent/20260101-task",
+      state: .running,
+      createdAt: Date(timeIntervalSince1970: 0),
+      updatedAt: Date(timeIntervalSince1970: 0)
+    )
+    try store.writeActive(record)
+
+    let repoDefinition = RepoDefinition(
+      key: "sample",
+      label: "sample",
+      path: RepoPath(root: .absolute, relative: repo.path),
+      tmuxSession: "sample",
+      defaultWindows: ["coding"]
+    )
+    let check = CommandDefinition(
+      id: "sample.check",
+      repoKey: "sample",
+      argv: ["fake-check"],
+      family: .check,
+      risk: .safe,
+      environment: .local,
+      role: .check,
+      behavior: .foreground,
+      confirmation: .none,
+      label: "Sample Check",
+      description: "Run check."
+    )
+    let catalog = CatalogBundle(
+      repos: [repoDefinition],
+      configuredCommands: [check],
+      commands: [check],
+      configuredActions: [],
+      actions: [],
+      layouts: [],
+      bundles: []
+    )
+    let runner = FakeForegroundCommandRunner { command in
+      if command.executable == "fake-check" {
+        return ForegroundCommandResult(status: 0, output: "check ok\n")
+      }
+      if command.executable.hasSuffix("/codex") {
+        return ForegroundCommandResult(status: 0, output: "review ok\n")
+      }
+      return ForegroundCommandResult(status: 0, output: "diff stat\n")
+    }
+
+    let result = try AgentWorkflowExecutor(
+      store: store,
+      catalog: catalog,
+      environment: ["PATH": fakeBin.path],
+      runner: runner
+    ).review(taskQuery: record.id)
+
+    try expect(result.ok, "agent review succeeds")
+    try expectEqual(result.snapshot.record.state, .review, "review updates state")
+    try expectEqual(result.snapshot.record.checkExit, 0, "review records check exit")
+    try expectEqual(result.snapshot.record.reviewExit, 0, "review records codex exit")
+    let artifact = try String(contentsOfFile: result.artifactPath, encoding: .utf8)
+    try expect(artifact.contains("Command: `fake-check`"), "review artifact records check argv")
+    try expect(artifact.contains("No check command found") == false, "review artifact uses catalog check")
+    try expect(artifact.contains("```text\nreview ok"), "review artifact opens codex output fence on its own line")
+    try expect(!artifact.contains("eval"), "review artifact does not mention shell eval")
+  }
+
+  private static func agentCleanPlanRefusesActiveTasksAndRequiresExactForDirtyWorktrees() throws {
+    let tempRoot = FileManager.default.temporaryDirectory
+      .appendingPathComponent("maestro-agent-clean-\(UUID().uuidString)")
+    defer {
+      try? FileManager.default.removeItem(at: tempRoot)
+    }
+    let worktree = tempRoot.appendingPathComponent("worktree")
+    try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true)
+    let store = AgentStateStore(stateDirectory: tempRoot.appendingPathComponent("state"), environment: [:])
+    var record = sampleAgentRecord(state: .running)
+    record.worktreePath = worktree.path
+    try store.writeActive(record)
+    let runner = FakeForegroundCommandRunner { _ in
+      ForegroundCommandResult(status: 0, output: " M README.md\n")
+    }
+    let executor = AgentWorkflowExecutor(store: store, environment: [:], runner: runner)
+
+    do {
+      _ = try executor.cleanPlan(taskQuery: record.id, force: false)
+      throw CheckFailure("expected active task clean to fail")
+    } catch let error as AgentWorkflowError {
+      try expectEqual(error, .cleanStateRefusal(record.id, "running"), "clean state refusal")
+    }
+
+    let snapshot = try store.task(matching: record.id, includeArchived: false)
+    record.state = .abandoned
+    _ = try store.update(snapshot, with: record)
+    let plan = try executor.cleanPlan(taskQuery: record.id, force: false)
+    try expect(plan.dirty, "dirty worktree detected")
+    try expect(plan.requiresExactConfirmation, "dirty cleanup requires exact confirmation")
+    do {
+      _ = try executor.clean(plan: plan, confirmation: .yes)
+      throw CheckFailure("expected dirty clean without exact confirmation to fail")
+    } catch let error as AgentWorkflowError {
+      try expectEqual(error, .cleanConfirmationRequired(plan.prompt), "dirty clean confirmation required")
+    }
+  }
+
+  private static func agentTmuxPlansTargetWindows() throws {
+    let tempRoot = FileManager.default.temporaryDirectory
+      .appendingPathComponent("maestro-agent-tmux-\(UUID().uuidString)")
+    defer {
+      try? FileManager.default.removeItem(at: tempRoot)
+    }
+    let store = AgentStateStore(stateDirectory: tempRoot, environment: [:])
+    try store.writeActive(sampleAgentRecord(state: .running))
+
+    let plan = try AgentWorkflowExecutor(
+      store: store,
+      environment: ["TMUX": "1"]
+    ).attachPlan(taskQuery: "sample-20260101-task")
+
+    try expectEqual(plan.target, "agents:agent:task - running", "agent tmux target includes window")
+    try expectEqual(plan.commands.map(\.arguments), [
+      ["switch-client", "-t", "agents:agent:task - running"]
+    ], "agent attach/focus target command")
   }
 
   private static func invalidLegacyAgentStateFailsValidation() throws {
@@ -705,7 +918,7 @@ struct MaestroCoreChecks {
     )
   }
 
-  private static func actionExecutionReportsBlockedBundleReasons() throws {
+  private static func actionExecutionAgentStatusIsExecutable() throws {
     let catalog = try checkedInCatalog()
     let planner = ActionExecutionPlanner(
       catalog: catalog,
@@ -713,16 +926,22 @@ struct MaestroCoreChecks {
       environment: ["TMUX": "1"]
     )
 
+    let statusPlan = try planner.plan(actionID: "agent.status.show")
+    let statusStep = try require(statusPlan.steps.first, "agent status action step")
+    let agentCommandPlan = try require(statusStep.agentCommandPlan, "agent status command plan")
+    try expect(statusPlan.runnable, "agent status action is runnable")
+    try expectEqual(agentCommandPlan.argv, ["agent-status"], "agent status argv")
+
     let plan = try planner.plan(actionID: "bundle.agent.reviewLoop.run")
 
-    try expect(!plan.runnable, "agent review loop bundle is blocked")
+    try expect(plan.runnable, "agent review loop bundle is runnable at catalog-planning time")
     try expectEqual(plan.steps.map(\.actionID), [
       "agent.status.show",
       "layout.terminal.stack.apply"
-    ], "blocked bundle remains inspectable")
+    ], "agent review loop expansion order")
     try expect(
-      plan.blockedReasons.contains { $0.contains("Agent action execution is not supported") },
-      "blocked bundle explains unsupported agent"
+      !plan.blockedReasons.contains { $0.contains("Agent action execution is not supported") },
+      "agent review loop no longer reports unsupported agent execution"
     )
   }
 
@@ -1096,6 +1315,18 @@ private struct FakeLayoutAutomation: LayoutAutomation, LayoutRuntimeReadinessPro
     promptForAccessibility: Bool
   ) -> LayoutRuntimeReadinessSnapshot {
     readiness
+  }
+}
+
+private struct FakeForegroundCommandRunner: ForegroundCommandRunning {
+  var handler: (ForegroundCommand) -> ForegroundCommandResult
+
+  init(_ handler: @escaping (ForegroundCommand) -> ForegroundCommandResult) {
+    self.handler = handler
+  }
+
+  func run(_ command: ForegroundCommand) throws -> ForegroundCommandResult {
+    handler(command)
   }
 }
 
