@@ -187,6 +187,7 @@ public struct CommandCenterValidator {
     validateUnique(config.repos.map(\.id), "repo", &issues)
     validateUnique(config.appTargets.map(\.id), "app_target", &issues)
     validateUnique(config.paneTemplates.map(\.id), "pane_template", &issues)
+    validateUnique(config.terminalProfiles?.map(\.id) ?? [], "terminal_profile", &issues)
     validateUnique(config.screenLayouts.map(\.id), "screen_layout", &issues)
     validateUnique(config.actions.map(\.id), "action", &issues)
     validateUnique(config.sections.map(\.id), "section", &issues)
@@ -195,6 +196,7 @@ public struct CommandCenterValidator {
     let repoIDs = Set(config.repos.map(\.id))
     let appTargetIDs = Set(config.appTargets.map(\.id))
     let templateIDs = Set(config.paneTemplates.map(\.id))
+    let terminalProfileIDs = Set(config.terminalProfiles?.map(\.id) ?? [])
     let layoutIDs = Set(config.screenLayouts.map(\.id))
     let actionIDs = Set(config.actions.map(\.id))
     let sectionIDs = Set(config.sections.map(\.id))
@@ -235,19 +237,48 @@ public struct CommandCenterValidator {
       }
     }
 
+    for profile in config.terminalProfiles ?? [] {
+      if !repoIDs.contains(profile.repoID) {
+        issues.append(issue("unknown_terminal_profile_repo", "Terminal profile \(profile.id) references unknown repo \(profile.repoID)."))
+      }
+      if !templateIDs.contains(profile.paneTemplateID) {
+        issues.append(issue("unknown_terminal_profile_template", "Terminal profile \(profile.id) references unknown pane template \(profile.paneTemplateID)."))
+      }
+      if let template = config.paneTemplates.first(where: { $0.id == profile.paneTemplateID }) {
+        let slotIDs = Set(template.slots.map(\.id))
+        validateUnique(profile.startupCommands.map(\.slotID), "terminal_profile_startup_slot_in_\(profile.id)", &issues)
+        for startup in profile.startupCommands {
+          if startup.argv.isEmpty {
+            issues.append(issue("empty_terminal_profile_startup_argv", "Terminal profile \(profile.id) startup command for slot \(startup.slotID) must define argv."))
+          }
+          if !slotIDs.contains(startup.slotID) {
+            issues.append(issue("unknown_terminal_profile_startup_slot", "Terminal profile \(profile.id) startup command references unknown slot \(startup.slotID)."))
+          }
+        }
+      }
+    }
+
     for layout in config.screenLayouts {
       if layout.terminalHosts.isEmpty && layout.appZones.isEmpty {
         issues.append(issue("empty_screen_layout", "Screen layout \(layout.id) must define a terminal host or app zone."))
       }
       validateUnique(layout.terminalHosts.map(\.id), "terminal_host_in_\(layout.id)", &issues)
+      validateUnique(layout.terminalHosts.map(\.effectiveTerminalProfileID), "terminal_profile_in_\(layout.id)", &issues)
       validateUnique(layout.appZones.map(\.id), "app_zone_in_\(layout.id)", &issues)
 
       for host in layout.terminalHosts {
-        if !repoIDs.contains(host.repoID) {
-          issues.append(issue("unknown_terminal_host_repo", "Terminal host \(host.id) references unknown repo \(host.repoID)."))
+        if let profileID = host.terminalProfileID {
+          if !terminalProfileIDs.contains(profileID) {
+            issues.append(issue("unknown_terminal_host_profile", "Terminal host \(host.id) references unknown terminal profile \(profileID)."))
+          }
+        } else if host.repoID == nil || host.paneTemplateID == nil {
+          issues.append(issue("missing_terminal_host_profile", "Terminal host \(host.id) must define terminalProfileID or legacy repoID and paneTemplateID."))
         }
-        if !templateIDs.contains(host.paneTemplateID) {
-          issues.append(issue("unknown_terminal_host_template", "Terminal host \(host.id) references unknown pane template \(host.paneTemplateID)."))
+        if let repoID = host.repoID, !repoIDs.contains(repoID) {
+          issues.append(issue("unknown_terminal_host_repo", "Terminal host \(host.id) references unknown repo \(repoID)."))
+        }
+        if let paneTemplateID = host.paneTemplateID, !templateIDs.contains(paneTemplateID) {
+          issues.append(issue("unknown_terminal_host_template", "Terminal host \(host.id) references unknown pane template \(paneTemplateID)."))
         }
         if !host.frame.isInsideUnitSpace {
           issues.append(issue("invalid_terminal_host_frame", "Terminal host \(host.id) frame must fit inside percentage space."))
@@ -267,7 +298,11 @@ public struct CommandCenterValidator {
       }
     }
 
-    let hostIDs = Set(config.screenLayouts.flatMap { $0.terminalHosts.map(\.id) })
+    let hostIDs = Set(config.screenLayouts.flatMap { layout in
+      layout.terminalHosts.flatMap { host in
+        [host.id, host.effectiveTerminalProfileID]
+      }
+    })
     for action in config.actions {
       switch action.kind {
       case .shellArgv:

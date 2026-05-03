@@ -6,6 +6,7 @@ public struct CommandCenterConfig: Codable, Equatable, Sendable {
   public var repos: [CommandRepo]
   public var appTargets: [AppTarget]
   public var paneTemplates: [PaneTemplate]
+  public var terminalProfiles: [TerminalProfile]?
   public var screenLayouts: [ScreenLayout]
   public var actions: [CommandCenterAction]
   public var sections: [CommandCenterSection]
@@ -17,6 +18,7 @@ public struct CommandCenterConfig: Codable, Equatable, Sendable {
     repos: [CommandRepo],
     appTargets: [AppTarget],
     paneTemplates: [PaneTemplate],
+    terminalProfiles: [TerminalProfile]? = nil,
     screenLayouts: [ScreenLayout],
     actions: [CommandCenterAction],
     sections: [CommandCenterSection],
@@ -27,6 +29,7 @@ public struct CommandCenterConfig: Codable, Equatable, Sendable {
     self.repos = repos
     self.appTargets = appTargets
     self.paneTemplates = paneTemplates
+    self.terminalProfiles = terminalProfiles
     self.screenLayouts = screenLayouts
     self.actions = actions
     self.sections = sections
@@ -122,28 +125,134 @@ public enum TerminalSessionStrategy: String, Codable, CaseIterable, Sendable {
   case perHost
 }
 
-public struct TerminalHost: Codable, Identifiable, Equatable, Sendable {
+public struct TerminalStartupCommand: Codable, Equatable, Sendable {
+  public var slotID: String
+  public var argv: [String]
+
+  public init(slotID: String, argv: [String]) {
+    self.slotID = slotID
+    self.argv = argv
+  }
+}
+
+public struct TerminalProfile: Codable, Identifiable, Equatable, Sendable {
   public var id: String
   public var label: String
   public var repoID: String
   public var paneTemplateID: String
-  public var frame: PercentRect
-  public var sessionStrategy: TerminalSessionStrategy
+  public var itermProfileName: String?
+  public var startupCommands: [TerminalStartupCommand]
 
   public init(
     id: String,
     label: String,
     repoID: String,
     paneTemplateID: String,
-    frame: PercentRect,
-    sessionStrategy: TerminalSessionStrategy = .perHost
+    itermProfileName: String? = nil,
+    startupCommands: [TerminalStartupCommand] = []
   ) {
     self.id = id
     self.label = label
     self.repoID = repoID
     self.paneTemplateID = paneTemplateID
+    self.itermProfileName = itermProfileName
+    self.startupCommands = startupCommands
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case label
+    case repoID
+    case paneTemplateID
+    case itermProfileName
+    case startupCommands
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.id = try container.decode(String.self, forKey: .id)
+    self.label = try container.decodeIfPresent(String.self, forKey: .label) ?? id
+    self.repoID = try container.decode(String.self, forKey: .repoID)
+    self.paneTemplateID = try container.decode(String.self, forKey: .paneTemplateID)
+    self.itermProfileName = try container.decodeIfPresent(String.self, forKey: .itermProfileName)
+    self.startupCommands = try container.decodeIfPresent([TerminalStartupCommand].self, forKey: .startupCommands) ?? []
+  }
+}
+
+public struct TerminalHost: Codable, Identifiable, Equatable, Sendable {
+  public var id: String
+  public var label: String
+  public var terminalProfileID: String?
+  public var repoID: String?
+  public var paneTemplateID: String?
+  public var frame: PercentRect
+  public var sessionStrategy: TerminalSessionStrategy
+
+  public init(
+    id: String,
+    label: String,
+    repoID: String? = nil,
+    paneTemplateID: String? = nil,
+    terminalProfileID: String? = nil,
+    frame: PercentRect,
+    sessionStrategy: TerminalSessionStrategy = .perHost
+  ) {
+    self.id = id
+    self.label = label
+    self.terminalProfileID = terminalProfileID
+    self.repoID = repoID
+    self.paneTemplateID = paneTemplateID
     self.frame = frame
     self.sessionStrategy = sessionStrategy
+  }
+
+  public var effectiveTerminalProfileID: String {
+    terminalProfileID ?? id
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case label
+    case terminalProfileID
+    case repoID
+    case paneTemplateID
+    case frame
+    case sessionStrategy
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.id = try container.decode(String.self, forKey: .id)
+    self.terminalProfileID = try container.decodeIfPresent(String.self, forKey: .terminalProfileID)
+    self.label = try container.decodeIfPresent(String.self, forKey: .label) ?? terminalProfileID ?? id
+    self.repoID = try container.decodeIfPresent(String.self, forKey: .repoID)
+    self.paneTemplateID = try container.decodeIfPresent(String.self, forKey: .paneTemplateID)
+    self.frame = try container.decode(PercentRect.self, forKey: .frame)
+    self.sessionStrategy = try container.decodeIfPresent(TerminalSessionStrategy.self, forKey: .sessionStrategy) ?? .perHost
+  }
+}
+
+public struct CommandCenterTerminalProfileResolver {
+  public init() {}
+
+  public func profile(for host: TerminalHost, in config: CommandCenterConfig) throws -> TerminalProfile {
+    if let profileID = host.terminalProfileID {
+      guard let profile = config.terminalProfiles?.first(where: { $0.id == profileID }) else {
+        throw CommandCenterConfigError.missingTerminalProfile(profileID)
+      }
+      return profile
+    }
+
+    guard let repoID = host.repoID, let paneTemplateID = host.paneTemplateID else {
+      throw CommandCenterConfigError.missingTerminalProfile(host.id)
+    }
+
+    return TerminalProfile(
+      id: host.id,
+      label: host.label,
+      repoID: repoID,
+      paneTemplateID: paneTemplateID
+    )
   }
 }
 
@@ -323,6 +432,7 @@ public enum CommandCenterConfigError: Error, LocalizedError, Equatable {
   case missingAppTarget(String)
   case missingPaneTemplate(String)
   case missingPaneSlot(hostID: String, slotID: String)
+  case missingTerminalProfile(String)
   case missingTerminalHost(String)
   case missingScreenLayout(String)
   case missingAction(String)
@@ -342,6 +452,8 @@ public enum CommandCenterConfigError: Error, LocalizedError, Equatable {
       return "Unknown pane template: \(id)"
     case let .missingPaneSlot(hostID, slotID):
       return "Unknown pane slot \(slotID) in host \(hostID)"
+    case let .missingTerminalProfile(id):
+      return "Unknown terminal profile: \(id)"
     case let .missingTerminalHost(id):
       return "Unknown terminal host: \(id)"
     case let .missingScreenLayout(id):

@@ -542,8 +542,10 @@ struct CommandCenterView: View {
 
           InspectorSection(title: "Hosts") {
             ForEach(layout.terminalHosts) { host in
-              let template = config.paneTemplates.first { $0.id == host.paneTemplateID }
-              InspectorRow(label: host.label, value: template?.label ?? host.paneTemplateID)
+              let profile = try? CommandCenterTerminalProfileResolver().profile(for: host, in: config)
+              let templateID = profile?.paneTemplateID ?? host.paneTemplateID ?? ""
+              let template = config.paneTemplates.first { $0.id == templateID }
+              InspectorRow(label: profile?.label ?? host.label, value: template?.label ?? templateID)
             }
           }
         }
@@ -577,8 +579,11 @@ struct CommandCenterView: View {
     HStack(spacing: 12) {
       Label(model.selectedLayoutID ?? "No layout", systemImage: "rectangle.3.group")
       if let layout = model.selectedLayout {
-        let sessions = layout.terminalHosts
-          .map { CommandCenterTmuxNaming.sessionName(workspaceID: config.workspace.id, hostID: $0.id) }
+        let sessions = layout.terminalHosts.compactMap { host in
+          (try? CommandCenterTerminalProfileResolver().profile(for: host, in: config)).map {
+            CommandCenterTmuxNaming.sessionName(workspaceID: config.workspace.id, hostID: $0.id)
+          }
+        }
           .joined(separator: ", ")
         Label(sessions.isEmpty ? "No terminal sessions" : sessions, systemImage: "terminal")
       }
@@ -718,13 +723,16 @@ struct TerminalHostPreview: View {
 
   var body: some View {
     GeometryReader { proxy in
-      let template = config.paneTemplates.first { $0.id == host.paneTemplateID }
+      let profile = try? CommandCenterTerminalProfileResolver().profile(for: host, in: config)
+      let profileID = profile?.id ?? host.effectiveTerminalProfileID
+      let templateID = profile?.paneTemplateID ?? host.paneTemplateID ?? ""
+      let template = config.paneTemplates.first { $0.id == templateID }
       ZStack(alignment: .topLeading) {
         VStack(alignment: .leading, spacing: 3) {
-          Label(host.label, systemImage: "terminal")
+          Label(profile?.label ?? host.label, systemImage: "terminal")
             .font(.caption)
             .fontWeight(.semibold)
-          Text(CommandCenterTmuxNaming.sessionName(workspaceID: config.workspace.id, hostID: host.id))
+          Text(CommandCenterTmuxNaming.sessionName(workspaceID: config.workspace.id, hostID: profileID))
             .font(.caption2)
             .foregroundStyle(.secondary)
             .lineLimit(1)

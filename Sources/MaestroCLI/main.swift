@@ -483,7 +483,10 @@ func printButtonPlan(_ plan: CommandButtonPlan) {
 func printLayoutPlan(_ plan: CommandCenterLayoutPlan, dryRun: Bool) {
   print("\(dryRun ? "Would apply" : "Applied") \(plan.layoutID)")
   for host in plan.terminalHosts {
-    print("  host \(host.hostID): \(Int(host.frame.x)),\(Int(host.frame.y)) \(Int(host.frame.width))x\(Int(host.frame.height)) \(host.sessionName)")
+    print("  host \(host.hostID) profile \(host.terminalProfileID): \(Int(host.frame.x)),\(Int(host.frame.y)) \(Int(host.frame.width))x\(Int(host.frame.height)) \(host.sessionName) \(host.ownershipDecision.rawValue)")
+    if !host.quarantinedWindowIDs.isEmpty {
+      print("    quarantined windows: \(host.quarantinedWindowIDs.joined(separator: ","))")
+    }
   }
   for zone in plan.appZones {
     print("  app zone \(zone.zoneID): \(zone.appTargetIDs.joined(separator: ","))")

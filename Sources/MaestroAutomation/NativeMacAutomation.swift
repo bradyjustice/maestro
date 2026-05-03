@@ -106,11 +106,23 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
     _ = try runAppleScript(focusHostWindowScript(hostID: hostID), operation: "focus_terminal_host_window")
   }
 
+  public func focusTerminalHostWindow(windowID: String) throws {
+    launchItermIfNeeded()
+    _ = try runAppleScript(focusHostWindowScript(windowID: windowID), operation: "focus_terminal_host_window_by_id")
+  }
+
   public func moveTerminalHostWindows(_ framesByHostID: [String: LayoutRect]) throws {
     guard !framesByHostID.isEmpty else {
       return
     }
     _ = try runAppleScript(moveHostWindowsScript(framesByHostID: framesByHostID), operation: "move_terminal_host_windows")
+  }
+
+  public func moveTerminalHostWindowsByWindowID(_ framesByWindowID: [String: LayoutRect]) throws {
+    guard !framesByWindowID.isEmpty else {
+      return
+    }
+    _ = try runAppleScript(moveHostWindowsByIDScript(framesByWindowID: framesByWindowID), operation: "move_terminal_host_windows_by_id")
   }
 
   public func focusApp(bundleID: String) throws {
@@ -269,9 +281,16 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
   }
 
   private func createHostWindowScript(host: ResolvedTerminalHost, attachCommand: String) -> String {
-    """
+    let createWindowCommand: String
+    if let profileName = host.itermProfileName, !profileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      createWindowCommand = "create window with profile \(appleScriptString(profileName))"
+    } else {
+      createWindowCommand = "create window with default profile"
+    }
+
+    return """
     tell application id "\(Self.iTermBundleIdentifier)"
-      set newWindow to (create window with default profile)
+      set newWindow to (\(createWindowCommand))
       tell current session of newWindow
         set variable named "\(Self.hostVariable)" to \(appleScriptString(host.id))
         set variable named "\(Self.sessionVariable)" to \(appleScriptString(host.sessionName))
@@ -312,6 +331,23 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
             set foundHostID to variable named "\(Self.hostVariable)"
           end tell
           if foundHostID is \(appleScriptString(hostID)) then
+            set index of targetWindow to 1
+            activate
+            return true
+          end if
+        end try
+      end repeat
+    end tell
+    return false
+    """
+  }
+
+  private func focusHostWindowScript(windowID: String) -> String {
+    """
+    tell application id "\(Self.iTermBundleIdentifier)"
+      repeat with targetWindow in windows
+        try
+          if (id of targetWindow as text) is \(appleScriptString(windowID)) then
             set index of targetWindow to 1
             activate
             return true
@@ -372,6 +408,33 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
               set foundHostID to variable named "\(Self.hostVariable)"
             end tell
             if foundHostID is expectedHostID then
+              set bounds of targetWindow to {item 2 of frameRecord, item 3 of frameRecord, item 4 of frameRecord, item 5 of frameRecord}
+              exit repeat
+            end if
+          end try
+        end repeat
+      end repeat
+      activate
+    end tell
+    """
+  }
+
+  private func moveHostWindowsByIDScript(framesByWindowID: [String: LayoutRect]) -> String {
+    let records = framesByWindowID
+      .sorted { $0.key < $1.key }
+      .map { windowID, frame in
+        "{\(appleScriptString(windowID)), \(Int(frame.x.rounded())), \(Int(frame.y.rounded())), \(Int(frame.maxX.rounded())), \(Int(frame.maxY.rounded()))}"
+      }
+      .joined(separator: ", ")
+
+    return """
+    set frameRecords to {\(records)}
+    tell application id "\(Self.iTermBundleIdentifier)"
+      repeat with frameRecord in frameRecords
+        set expectedWindowID to item 1 of frameRecord
+        repeat with targetWindow in windows
+          try
+            if (id of targetWindow as text) is expectedWindowID then
               set bounds of targetWindow to {item 2 of frameRecord, item 3 of frameRecord, item 4 of frameRecord, item 5 of frameRecord}
               exit repeat
             end if

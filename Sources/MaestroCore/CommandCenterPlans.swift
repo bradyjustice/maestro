@@ -5,6 +5,13 @@ public enum CommandCenterSurfaceStatus: String, Codable, Equatable, Sendable {
   case missingWindow = "missing-window"
 }
 
+public enum CommandCenterWindowOwnershipDecision: String, Codable, Equatable, Sendable {
+  case reused
+  case created
+  case missing
+  case duplicateQuarantined = "duplicate-quarantined"
+}
+
 public struct CommandCenterPaneSlotPlan: Codable, Equatable, Sendable {
   public var slotID: String
   public var label: String
@@ -32,34 +39,43 @@ public struct CommandCenterPaneSlotPlan: Codable, Equatable, Sendable {
 
 public struct CommandCenterTerminalHostPlan: Codable, Equatable, Sendable {
   public var hostID: String
+  public var terminalProfileID: String
   public var label: String
   public var repoID: String
   public var sessionName: String
   public var windowName: String
   public var frame: LayoutRect
   public var status: CommandCenterSurfaceStatus
+  public var ownershipDecision: CommandCenterWindowOwnershipDecision
   public var window: TerminalWindowSnapshot?
+  public var quarantinedWindowIDs: [String]
   public var slots: [CommandCenterPaneSlotPlan]
 
   public init(
     hostID: String,
+    terminalProfileID: String,
     label: String,
     repoID: String,
     sessionName: String,
     windowName: String,
     frame: LayoutRect,
     status: CommandCenterSurfaceStatus,
+    ownershipDecision: CommandCenterWindowOwnershipDecision,
     window: TerminalWindowSnapshot? = nil,
+    quarantinedWindowIDs: [String] = [],
     slots: [CommandCenterPaneSlotPlan]
   ) {
     self.hostID = hostID
+    self.terminalProfileID = terminalProfileID
     self.label = label
     self.repoID = repoID
     self.sessionName = sessionName
     self.windowName = windowName
     self.frame = frame
     self.status = status
+    self.ownershipDecision = ownershipDecision
     self.window = window
+    self.quarantinedWindowIDs = quarantinedWindowIDs
     self.slots = slots
   }
 
@@ -109,6 +125,10 @@ public struct CommandCenterLayoutPlan: Codable, Equatable, Sendable {
   public var missingHostIDs: [String] {
     terminalHosts.filter { $0.status == .missingWindow }.map(\.hostID)
   }
+
+  public var missingTerminalProfileIDs: [String] {
+    terminalHosts.filter { $0.status == .missingWindow }.map(\.terminalProfileID)
+  }
 }
 
 public struct CommandCenterLayoutPlanner {
@@ -118,27 +138,44 @@ public struct CommandCenterLayoutPlanner {
     layout: ScreenLayout,
     config: CommandCenterConfig,
     screen: LayoutScreen,
-    windows: [TerminalWindowSnapshot] = []
+    windows: [TerminalWindowSnapshot] = [],
+    state: CommandCenterState = CommandCenterState(),
+    createdTerminalProfileIDs: Set<String> = []
   ) throws -> CommandCenterLayoutPlan {
     let taggedWindows = windows
       .filter { $0.isVisible && !$0.isMinimized && $0.targetID != nil }
       .sorted { $0.id < $1.id }
     var usedWindowIDs = Set<String>()
     var hostPlans: [CommandCenterTerminalHostPlan] = []
+    let profileResolver = CommandCenterTerminalProfileResolver()
 
     for host in layout.terminalHosts {
-      let template = try paneTemplate(host.paneTemplateID, in: config)
+      let profile = try profileResolver.profile(for: host, in: config)
+      let template = try paneTemplate(profile.paneTemplateID, in: config)
       let hostFrame = host.frame.frame(in: screen.visibleFrame)
-      let sessionName = CommandCenterTmuxNaming.sessionName(workspaceID: config.workspace.id, hostID: host.id)
-      let window = taggedWindows.first { window in
-        !usedWindowIDs.contains(window.id) && window.targetID == host.id
-      }
+      let sessionName = CommandCenterTmuxNaming.sessionName(workspaceID: config.workspace.id, hostID: profile.id)
+      let candidateWindows = taggedWindows.filter { $0.targetID == profile.id && !usedWindowIDs.contains($0.id) }
+      let canonicalWindowID = state.canonicalTerminalWindow(profileID: profile.id)?.iTermWindowID
+      let window = candidateWindows.first { $0.id == canonicalWindowID } ?? candidateWindows.first
       if let window {
         usedWindowIDs.insert(window.id)
       }
+      let quarantinedWindowIDs = candidateWindows
+        .filter { $0.id != window?.id }
+        .map(\.id)
+      let ownershipDecision: CommandCenterWindowOwnershipDecision
+      if !quarantinedWindowIDs.isEmpty {
+        ownershipDecision = .duplicateQuarantined
+      } else if window == nil {
+        ownershipDecision = .missing
+      } else if createdTerminalProfileIDs.contains(profile.id) {
+        ownershipDecision = .created
+      } else {
+        ownershipDecision = .reused
+      }
 
       let slotPlans = template.slots.enumerated().map { index, slot in
-        let repoID = slot.repoID ?? host.repoID
+        let repoID = slot.repoID ?? profile.repoID
         return CommandCenterPaneSlotPlan(
           slotID: slot.id,
           label: slot.label,
@@ -151,23 +188,28 @@ public struct CommandCenterLayoutPlanner {
 
       hostPlans.append(CommandCenterTerminalHostPlan(
         hostID: host.id,
-        label: host.label,
-        repoID: host.repoID,
+        terminalProfileID: profile.id,
+        label: profile.label,
+        repoID: profile.repoID,
         sessionName: sessionName,
         windowName: CommandCenterTmuxNaming.windowName,
         frame: hostFrame,
         status: window == nil ? .missingWindow : .matched,
+        ownershipDecision: ownershipDecision,
         window: window,
+        quarantinedWindowIDs: quarantinedWindowIDs,
         slots: slotPlans
       ))
     }
 
-    let layoutHostIDs = Set(layout.terminalHosts.map(\.id))
+    let layoutProfileIDs = Set(try layout.terminalHosts.map {
+      try profileResolver.profile(for: $0, in: config).id
+    })
     let unmanaged = windows.filter { window in
-      guard let hostID = window.targetID else {
+      guard let profileID = window.targetID else {
         return false
       }
-      return layoutHostIDs.contains(hostID) && !usedWindowIDs.contains(window.id)
+      return layoutProfileIDs.contains(profileID) && !usedWindowIDs.contains(window.id)
     }
 
     let appZones = layout.appZones.map {
@@ -228,29 +270,38 @@ public struct ResolvedCommandRepo: Codable, Equatable, Sendable {
 
 public struct ResolvedTerminalHost: Codable, Equatable, Sendable {
   public var id: String
+  public var layoutHostID: String
   public var label: String
   public var repo: ResolvedCommandRepo
   public var sessionName: String
   public var windowName: String
   public var paneTemplate: PaneTemplate
   public var slotRepos: [String: ResolvedCommandRepo]
+  public var itermProfileName: String?
+  public var startupCommands: [TerminalStartupCommand]
 
   public init(
     id: String,
+    layoutHostID: String? = nil,
     label: String,
     repo: ResolvedCommandRepo,
     sessionName: String,
     windowName: String,
     paneTemplate: PaneTemplate,
-    slotRepos: [String: ResolvedCommandRepo] = [:]
+    slotRepos: [String: ResolvedCommandRepo] = [:],
+    itermProfileName: String? = nil,
+    startupCommands: [TerminalStartupCommand] = []
   ) {
     self.id = id
+    self.layoutHostID = layoutHostID ?? id
     self.label = label
     self.repo = repo
     self.sessionName = sessionName
     self.windowName = windowName
     self.paneTemplate = paneTemplate
     self.slotRepos = slotRepos
+    self.itermProfileName = itermProfileName
+    self.startupCommands = startupCommands
   }
 
   public var tmuxWindowTarget: String {

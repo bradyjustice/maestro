@@ -10,7 +10,12 @@ struct MaestroCoreChecks {
     try commandCenterValidationRejectsBrokenReferences()
     try defaultLayoutFramesAndAppOverlapResolve()
     try paneTemplateGeometryResolves()
+    try legacyHostsResolveAsImplicitTerminalProfiles()
     try taggedHostPlanningIgnoresUnmanagedWindows()
+    try layoutApplyReusesOwnedTerminalWindowFromState()
+    try duplicateTaggedTerminalWindowsAreQuarantined()
+    try startupCommandsRunOnlyForIdlePanes()
+    try itermProfileNameFlowsToCreatedWindow()
     try tmuxHostPlansCreateSplitRetagAndReattach()
     try actionPlansRenderSafeCommands()
     try busyPaneBlocksWithoutConfirmationAndSendsWithConfirmation()
@@ -184,6 +189,22 @@ struct MaestroCoreChecks {
     try expectEqual(single.terminalHosts[0].slots[0].frame, LayoutRect(x: 0, y: 0, width: 1440, height: 900), "single pane fills host")
   }
 
+  private static func legacyHostsResolveAsImplicitTerminalProfiles() throws {
+    let config = try checkedInConfig()
+    let layout = try require(config.screenLayouts.first { $0.id == "terminal-left-third" }, "terminal-left-third layout")
+    let plan = try CommandCenterLayoutPlanner().plan(
+      layout: layout,
+      config: config,
+      screen: representativeScreen(),
+      windows: [TerminalWindowSnapshot(id: "main-window", targetID: "main")]
+    )
+    let host = try require(plan.terminalHosts.first, "main terminal host")
+    try expectEqual(host.hostID, "main", "legacy layout host id is preserved")
+    try expectEqual(host.terminalProfileID, "main", "legacy layout host becomes implicit terminal profile")
+    try expectEqual(host.sessionName, "maestro.node.main", "implicit profile names tmux session")
+    try expectEqual(host.ownershipDecision, .reused, "legacy tagged host is reusable")
+  }
+
   private static func taggedHostPlanningIgnoresUnmanagedWindows() throws {
     let config = try checkedInConfig()
     let layout = try require(config.screenLayouts.first { $0.id == "terminal-left-third" }, "terminal-left-third layout")
@@ -200,6 +221,119 @@ struct MaestroCoreChecks {
     )
     try expectEqual(plan.terminalHosts[0].status, .matched, "managed host matched")
     try expectEqual(plan.unmanagedWindowCount, 1, "duplicate tagged window counted but untagged window ignored")
+  }
+
+  private static func layoutApplyReusesOwnedTerminalWindowFromState() throws {
+    let config = try configWithTerminalProfile()
+    let fakeWindows = FakeCommandCenterAutomation(taggedWindows: [
+      TerminalWindowSnapshot(id: "owned-work", targetID: "work")
+    ])
+    let store = temporaryStateStore()
+    try store.save(CommandCenterState(
+      activeLayoutID: "profile-left",
+      hostSessions: ["work": "maestro.node.work"],
+      terminalWindows: [
+        CommandCenterOwnedTerminalWindow(
+          profileID: "work",
+          iTermWindowID: "owned-work",
+          sessionName: "maestro.node.work",
+          windowName: "main",
+          status: .canonical
+        )
+      ]
+    ))
+
+    let plan = try runtimeForChecks(
+      config: config,
+      runner: RecordingRunner(),
+      windows: fakeWindows,
+      stateStore: store
+    ).applyLayout(id: "profile-left")
+
+    let host = try require(plan.terminalHosts.first, "profile host")
+    try expectEqual(host.terminalProfileID, "work", "explicit layout host resolves terminal profile")
+    try expectEqual(host.window?.id, "owned-work", "layout reuses owned state window")
+    try expectEqual(host.ownershipDecision, .reused, "reused state window is reported")
+    try expect(fakeWindows.createdHosts.isEmpty, "reapplying layout does not create a duplicate iTerm window")
+    try expectEqual(fakeWindows.movedFramesByWindowID["owned-work"], host.frame, "canonical owned window is moved by iTerm window id")
+  }
+
+  private static func duplicateTaggedTerminalWindowsAreQuarantined() throws {
+    let config = try configWithTerminalProfile()
+    let fakeWindows = FakeCommandCenterAutomation(taggedWindows: [
+      TerminalWindowSnapshot(id: "a-work", targetID: "work"),
+      TerminalWindowSnapshot(id: "b-work", targetID: "work")
+    ])
+    let store = temporaryStateStore()
+    let plan = try runtimeForChecks(
+      config: config,
+      runner: RecordingRunner(),
+      windows: fakeWindows,
+      stateStore: store
+    ).applyLayout(id: "profile-left")
+
+    let host = try require(plan.terminalHosts.first, "profile host")
+    try expectEqual(host.window?.id, "a-work", "first duplicate becomes canonical without prior state")
+    try expectEqual(host.quarantinedWindowIDs, ["b-work"], "duplicate tagged window is quarantined")
+    try expectEqual(host.ownershipDecision, .duplicateQuarantined, "duplicate quarantine is reported in layout plan")
+    try expect(fakeWindows.createdHosts.isEmpty, "duplicate tagged windows do not cause another create")
+    let state = store.load()
+    try expect(state.terminalWindows.contains {
+      $0.iTermWindowID == "a-work" && $0.status == .canonical
+    }, "canonical duplicate is stored")
+    try expect(state.terminalWindows.contains {
+      $0.iTermWindowID == "b-work" && $0.status == .quarantined
+    }, "duplicate is stored as quarantined")
+  }
+
+  private static func startupCommandsRunOnlyForIdlePanes() throws {
+    let startupCommands = [
+      TerminalStartupCommand(slotID: "top", argv: ["npm", "run", "dev"]),
+      TerminalStartupCommand(slotID: "bottom", argv: ["npm", "run", "dev"])
+    ]
+    let config = try configWithTerminalProfile(startupCommands: startupCommands)
+    let runner = RecordingRunner()
+    runner.result(
+      stdout: "zsh\n",
+      for: ["tmux", "display-message", "-p", "-t", "maestro.node.work:main.0", "#{pane_current_command}"]
+    )
+    runner.result(
+      stdout: "node\n",
+      for: ["tmux", "display-message", "-p", "-t", "maestro.node.work:main.1", "#{pane_current_command}"]
+    )
+
+    _ = try runtimeForChecks(
+      config: config,
+      runner: runner,
+      windows: FakeCommandCenterAutomation(taggedWindows: [
+        TerminalWindowSnapshot(id: "work-window", targetID: "work")
+      ]),
+      stateStore: temporaryStateStore()
+    ).applyLayout(id: "profile-left")
+
+    try expect(runner.calls.contains {
+      $0 == ["tmux", "send-keys", "-t", "maestro.node.work:main.0", "npm run dev", "C-m"]
+    }, "startup command is sent to shell-idle pane")
+    try expect(!runner.calls.contains {
+      $0 == ["tmux", "send-keys", "-t", "maestro.node.work:main.1", "npm run dev", "C-m"]
+    }, "startup command is skipped for busy pane")
+  }
+
+  private static func itermProfileNameFlowsToCreatedWindow() throws {
+    let config = try configWithTerminalProfile()
+    let fakeWindows = FakeCommandCenterAutomation()
+    let plan = try runtimeForChecks(
+      config: config,
+      runner: RecordingRunner(),
+      windows: fakeWindows,
+      stateStore: temporaryStateStore()
+    ).applyLayout(id: "profile-left")
+
+    let host = try require(plan.terminalHosts.first, "profile host")
+    let createdHost = try require(fakeWindows.createdHosts.first, "created host")
+    try expectEqual(createdHost.itermProfileName, "Maestro Work", "iTerm profile name is carried to create-window automation")
+    try expectEqual(host.ownershipDecision, .created, "created window is reported in layout plan")
+    try expectEqual(host.window?.targetID, "work", "created fake iTerm window is tagged by terminal profile id")
   }
 
   private static func tmuxHostPlansCreateSplitRetagAndReattach() throws {
@@ -469,16 +603,55 @@ struct MaestroCoreChecks {
   private static func runtimeForChecks(
     config: CommandCenterConfig,
     runner: RecordingRunner,
-    diagnostics: MaestroDiagnostics = .disabled
+    diagnostics: MaestroDiagnostics = .disabled,
+    windows: any CommandCenterWindowAutomation = FakeCommandCenterAutomation(),
+    stateStore: CommandCenterStateStore? = nil
   ) -> CommandCenterRuntime {
     CommandCenterRuntime(
       config: config,
       configDirectory: repoRoot().appendingPathComponent("maestro/config"),
       environment: ["HOME": "/repo"],
       tmux: TmuxController(runner: runner, diagnostics: diagnostics),
-      windows: FakeCommandCenterAutomation(),
-      stateStore: CommandCenterStateStore(stateDirectory: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("maestro-core-checks-state")),
+      windows: windows,
+      stateStore: stateStore ?? temporaryStateStore(),
       diagnostics: diagnostics
+    )
+  }
+
+  private static func configWithTerminalProfile(
+    startupCommands: [TerminalStartupCommand] = []
+  ) throws -> CommandCenterConfig {
+    var config = try checkedInConfig()
+    config.terminalProfiles = [
+      TerminalProfile(
+        id: "work",
+        label: "Work",
+        repoID: "website",
+        paneTemplateID: "work-stack",
+        itermProfileName: "Maestro Work",
+        startupCommands: startupCommands
+      )
+    ]
+    config.screenLayouts.append(ScreenLayout(
+      id: "profile-left",
+      label: "Profile Left",
+      terminalHosts: [
+        TerminalHost(
+          id: "work-left",
+          label: "Work Placement",
+          terminalProfileID: "work",
+          frame: PercentRect(x: 0, y: 0, width: 0.5, height: 1)
+        )
+      ]
+    ))
+    try expect(CommandCenterValidator().validate(config).ok, "terminal profile test config validates")
+    return config
+  }
+
+  private static func temporaryStateStore() -> CommandCenterStateStore {
+    CommandCenterStateStore(
+      stateDirectory: URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("maestro-core-checks-state-\(UUID().uuidString)")
     )
   }
 
@@ -565,7 +738,19 @@ final class RecordingRunner: CommandRunning, @unchecked Sendable {
   }
 }
 
-struct FakeCommandCenterAutomation: CommandCenterWindowAutomation {
+final class FakeCommandCenterAutomation: CommandCenterWindowAutomation, @unchecked Sendable {
+  var taggedWindows: [TerminalWindowSnapshot]
+  var createdHosts: [ResolvedTerminalHost] = []
+  var createdAttachCommands: [String] = []
+  var focusedHostIDs: [String] = []
+  var focusedWindowIDs: [String] = []
+  var movedFramesByHostID: [String: LayoutRect] = [:]
+  var movedFramesByWindowID: [String: LayoutRect] = [:]
+
+  init(taggedWindows: [TerminalWindowSnapshot] = []) {
+    self.taggedWindows = taggedWindows
+  }
+
   func activeScreen() -> LayoutScreen {
     LayoutScreen(
       id: "screen",
@@ -576,14 +761,30 @@ struct FakeCommandCenterAutomation: CommandCenterWindowAutomation {
   }
 
   func taggedTerminalHostWindows() throws -> [TerminalWindowSnapshot] {
-    []
+    taggedWindows
   }
 
-  func createTerminalHostWindow(for host: ResolvedTerminalHost, attachCommand: String) throws {}
+  func createTerminalHostWindow(for host: ResolvedTerminalHost, attachCommand: String) throws {
+    createdHosts.append(host)
+    createdAttachCommands.append(attachCommand)
+    taggedWindows.append(TerminalWindowSnapshot(id: "created-\(host.id)", targetID: host.id))
+  }
 
-  func focusTerminalHostWindow(hostID: String) throws {}
+  func focusTerminalHostWindow(hostID: String) throws {
+    focusedHostIDs.append(hostID)
+  }
 
-  func moveTerminalHostWindows(_ framesByHostID: [String: LayoutRect]) throws {}
+  func focusTerminalHostWindow(windowID: String) throws {
+    focusedWindowIDs.append(windowID)
+  }
+
+  func moveTerminalHostWindows(_ framesByHostID: [String: LayoutRect]) throws {
+    movedFramesByHostID.merge(framesByHostID, uniquingKeysWith: { _, new in new })
+  }
+
+  func moveTerminalHostWindowsByWindowID(_ framesByWindowID: [String: LayoutRect]) throws {
+    movedFramesByWindowID.merge(framesByWindowID, uniquingKeysWith: { _, new in new })
+  }
 
   func focusApp(bundleID: String) throws {}
 

@@ -6,7 +6,9 @@ public protocol CommandCenterWindowAutomation: Sendable {
   func taggedTerminalHostWindows() throws -> [TerminalWindowSnapshot]
   func createTerminalHostWindow(for host: ResolvedTerminalHost, attachCommand: String) throws
   func focusTerminalHostWindow(hostID: String) throws
+  func focusTerminalHostWindow(windowID: String) throws
   func moveTerminalHostWindows(_ framesByHostID: [String: LayoutRect]) throws
+  func moveTerminalHostWindowsByWindowID(_ framesByWindowID: [String: LayoutRect]) throws
   func focusApp(bundleID: String) throws
   func openURL(_ url: String, bundleID: String?) throws
   func openRepo(path: String, bundleID: String) throws
@@ -138,25 +140,34 @@ public struct CommandCenterRuntime: Sendable {
 
   public func resolveHost(hostID: String, layoutID: String? = nil) throws -> ResolvedTerminalHost {
     let layout = try screenLayout(id: layoutID)
-    guard let host = layout.terminalHosts.first(where: { $0.id == hostID }) else {
+    guard let host = layout.terminalHosts.first(where: { $0.effectiveTerminalProfileID == hostID })
+      ?? layout.terminalHosts.first(where: { $0.id == hostID }) else {
       throw CommandCenterConfigError.missingTerminalHost(hostID)
     }
-    guard let template = config.paneTemplates.first(where: { $0.id == host.paneTemplateID }) else {
-      throw CommandCenterConfigError.missingPaneTemplate(host.paneTemplateID)
+    return try resolveHost(host)
+  }
+
+  private func resolveHost(_ host: TerminalHost) throws -> ResolvedTerminalHost {
+    let profile = try CommandCenterTerminalProfileResolver().profile(for: host, in: config)
+    guard let template = config.paneTemplates.first(where: { $0.id == profile.paneTemplateID }) else {
+      throw CommandCenterConfigError.missingPaneTemplate(profile.paneTemplateID)
     }
     var slotRepos: [String: ResolvedCommandRepo] = [:]
     for slot in template.slots {
-      let repoID = slot.repoID ?? host.repoID
+      let repoID = slot.repoID ?? profile.repoID
       slotRepos[slot.id] = try resolveRepo(id: repoID)
     }
     return ResolvedTerminalHost(
-      id: host.id,
-      label: host.label,
-      repo: try resolveRepo(id: host.repoID),
-      sessionName: CommandCenterTmuxNaming.sessionName(workspaceID: config.workspace.id, hostID: host.id),
+      id: profile.id,
+      layoutHostID: host.id,
+      label: profile.label,
+      repo: try resolveRepo(id: profile.repoID),
+      sessionName: CommandCenterTmuxNaming.sessionName(workspaceID: config.workspace.id, hostID: profile.id),
       windowName: CommandCenterTmuxNaming.windowName,
       paneTemplate: template,
-      slotRepos: slotRepos
+      slotRepos: slotRepos,
+      itermProfileName: profile.itermProfileName,
+      startupCommands: profile.startupCommands
     )
   }
 
@@ -175,7 +186,8 @@ public struct CommandCenterRuntime: Sendable {
       layout: layout,
       config: config,
       screen: windows.activeScreen(),
-      windows: try windows.taggedTerminalHostWindows()
+      windows: try windows.taggedTerminalHostWindows(),
+      state: stateStore.load()
     )
   }
 
@@ -189,25 +201,30 @@ public struct CommandCenterRuntime: Sendable {
     )
     do {
       let layout = try screenLayout(id: id)
-      let resolvedHosts = try layout.terminalHosts.map { try resolveHost(hostID: $0.id, layoutID: layout.id) }
+      let resolvedHosts = try layout.terminalHosts.map { try resolveHost($0) }
       var sessionsByHostID: [String: String] = [:]
       for host in resolvedHosts {
         let plan = try tmux.ensureHost(host)
         sessionsByHostID[host.id] = plan.host.sessionName
+        try runStartupCommandsIfIdle(for: host)
       }
 
       let screen = windows.activeScreen()
+      let state = stateStore.load()
       var tagged = try windows.taggedTerminalHostWindows()
       var plan = try CommandCenterLayoutPlanner().plan(
         layout: layout,
         config: config,
         screen: screen,
-        windows: tagged
+        windows: tagged,
+        state: state
       )
 
-      let missingIDs = Set(plan.missingHostIDs)
+      let missingIDs = Set(plan.missingTerminalProfileIDs)
+      var createdProfileIDs = Set<String>()
       for host in resolvedHosts where missingIDs.contains(host.id) {
         try windows.createTerminalHostWindow(for: host, attachCommand: attachCommand(for: host))
+        createdProfileIDs.insert(host.id)
       }
 
       if !missingIDs.isEmpty {
@@ -216,15 +233,19 @@ public struct CommandCenterRuntime: Sendable {
           layout: layout,
           config: config,
           screen: screen,
-          windows: tagged
+          windows: tagged,
+          state: state,
+          createdTerminalProfileIDs: createdProfileIDs
         )
       }
 
-      var framesByHostID: [String: LayoutRect] = [:]
+      var framesByWindowID: [String: LayoutRect] = [:]
       for host in plan.terminalHosts {
-        framesByHostID[host.hostID] = host.frame
+        if let windowID = host.window?.id {
+          framesByWindowID[windowID] = host.frame
+        }
       }
-      try windows.moveTerminalHostWindows(framesByHostID)
+      try windows.moveTerminalHostWindowsByWindowID(framesByWindowID)
 
       let appFrames = appFramesByTargetID(plan: plan)
       let appTargets = plan.appZones.flatMap { zone in
@@ -234,7 +255,13 @@ public struct CommandCenterRuntime: Sendable {
 
       try stateStore.save(CommandCenterState(
         activeLayoutID: layout.id,
-        hostSessions: sessionsByHostID
+        hostSessions: sessionsByHostID,
+        terminalWindows: terminalWindowRecords(
+          plan: plan,
+          taggedWindows: tagged,
+          layoutID: layout.id,
+          screenID: screen.id
+        )
       ))
       diagnostics.emit(
         level: .info,
@@ -405,7 +432,12 @@ public struct CommandCenterRuntime: Sendable {
         return CommandCenterRunResult(ok: true, id: id, status: .opened, message: "opened")
       case .focusSurface:
         if let hostID = action.hostID {
-          try windows.focusTerminalHostWindow(hostID: hostID)
+          let host = try resolveHost(hostID: hostID, layoutID: layoutID)
+          if let windowID = stateStore.load().canonicalTerminalWindow(profileID: host.id)?.iTermWindowID {
+            try windows.focusTerminalHostWindow(windowID: windowID)
+          } else {
+            try windows.focusTerminalHostWindow(hostID: host.id)
+          }
         }
         if let bundleID = plan.appTarget?.bundleID {
           try windows.focusApp(bundleID: bundleID)
@@ -437,14 +469,14 @@ public struct CommandCenterRuntime: Sendable {
   public func configuredPaneBindings(layoutID: String? = nil) throws -> [CommandCenterPaneBinding] {
     let layout = try screenLayout(id: layoutID)
     return try layout.terminalHosts.flatMap { host -> [CommandCenterPaneBinding] in
-      let resolved = try resolveHost(hostID: host.id, layoutID: layout.id)
+      let resolved = try resolveHost(host)
       return resolved.paneTemplate.slots.enumerated().map { index, slot in
         CommandCenterPaneBinding(
           layoutID: layout.id,
-          hostID: host.id,
+          hostID: resolved.id,
           slotID: slot.id,
           role: slot.role,
-          repoID: slot.repoID ?? host.repoID,
+          repoID: resolved.repo(for: slot).id,
           paneTarget: "\(resolved.tmuxWindowTarget).\(index)"
         )
       }
@@ -453,8 +485,8 @@ public struct CommandCenterRuntime: Sendable {
 
   public func livePaneList(layoutID: String? = nil) throws -> [LiveTmuxPaneSnapshot] {
     let layout = try screenLayout(id: layoutID)
-    let sessions = layout.terminalHosts.map {
-      CommandCenterTmuxNaming.sessionName(workspaceID: config.workspace.id, hostID: $0.id)
+    let sessions = try layout.terminalHosts.map {
+      try resolveHost($0).sessionName
     }
     return try tmux.listMaestroPanes(sessions: sessions)
   }
@@ -563,6 +595,116 @@ public struct CommandCenterRuntime: Sendable {
       message: "Action was blocked",
       context: context
     )
+  }
+
+  private func runStartupCommandsIfIdle(for host: ResolvedTerminalHost) throws {
+    for startup in host.startupCommands {
+      guard !startup.argv.isEmpty else {
+        continue
+      }
+      let paneTarget = try host.paneTarget(slotID: startup.slotID)
+      let currentCommand = try tmux.paneCurrentCommand(paneTarget: paneTarget)
+      guard ShellProcessClassifier.isShell(currentCommand) else {
+        diagnostics.emit(
+          level: .info,
+          component: "command_center.runtime",
+          name: "startup.skip.busy_pane",
+          message: "Skipped terminal startup command because the pane is busy",
+          context: [
+            "terminal_profile_id": host.id,
+            "slot_id": startup.slotID,
+            "pane_target": paneTarget,
+            "current_command": MaestroDiagnostics.safeSummary(currentCommand)
+          ]
+        )
+        continue
+      }
+      let display = ShellCommandRenderer.render(startup.argv)
+      try tmux.run(TmuxCommand(arguments: ["send-keys", "-t", paneTarget, display, "C-m"]))
+      diagnostics.emit(
+        level: .info,
+        component: "command_center.runtime",
+        name: "startup.sent",
+        message: "Sent terminal startup command",
+        context: [
+          "terminal_profile_id": host.id,
+          "slot_id": startup.slotID,
+          "pane_target": paneTarget
+        ]
+      )
+    }
+  }
+
+  private func terminalWindowRecords(
+    plan: CommandCenterLayoutPlan,
+    taggedWindows: [TerminalWindowSnapshot],
+    layoutID: String,
+    screenID: String
+  ) -> [CommandCenterOwnedTerminalWindow] {
+    let timestamp = ISO8601DateFormatter().string(from: Date())
+    var records: [CommandCenterOwnedTerminalWindow] = []
+    var recordedWindowIDs = Set<String>()
+    var hostByProfileID: [String: CommandCenterTerminalHostPlan] = [:]
+    for host in plan.terminalHosts where hostByProfileID[host.terminalProfileID] == nil {
+      hostByProfileID[host.terminalProfileID] = host
+    }
+
+    for host in plan.terminalHosts {
+      if let window = host.window {
+        records.append(CommandCenterOwnedTerminalWindow(
+          profileID: host.terminalProfileID,
+          iTermWindowID: window.id,
+          sessionName: host.sessionName,
+          windowName: host.windowName,
+          layoutID: layoutID,
+          screenID: screenID,
+          frame: host.frame,
+          lastSeenAt: timestamp,
+          status: .canonical
+        ))
+        recordedWindowIDs.insert(window.id)
+      }
+
+      for windowID in host.quarantinedWindowIDs {
+        records.append(CommandCenterOwnedTerminalWindow(
+          profileID: host.terminalProfileID,
+          iTermWindowID: windowID,
+          sessionName: host.sessionName,
+          windowName: host.windowName,
+          layoutID: layoutID,
+          screenID: screenID,
+          frame: nil,
+          lastSeenAt: timestamp,
+          status: .quarantined
+        ))
+        recordedWindowIDs.insert(windowID)
+      }
+    }
+
+    for window in taggedWindows where !recordedWindowIDs.contains(window.id) {
+      guard let profileID = window.targetID else {
+        continue
+      }
+      let host = hostByProfileID[profileID]
+      records.append(CommandCenterOwnedTerminalWindow(
+        profileID: profileID,
+        iTermWindowID: window.id,
+        sessionName: host?.sessionName ?? CommandCenterTmuxNaming.sessionName(workspaceID: config.workspace.id, hostID: profileID),
+        windowName: host?.windowName ?? CommandCenterTmuxNaming.windowName,
+        layoutID: host == nil ? nil : layoutID,
+        screenID: screenID,
+        frame: window.frame,
+        lastSeenAt: timestamp,
+        status: .unmanaged
+      ))
+    }
+
+    return records.sorted {
+      if $0.profileID == $1.profileID {
+        return $0.iTermWindowID < $1.iTermWindowID
+      }
+      return $0.profileID < $1.profileID
+    }
   }
 
   private func waitForTaggedHostWindows(
