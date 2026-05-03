@@ -1,8 +1,4 @@
-# Maestro Palette
-
-Maestro is a native macOS floating palette for a small set of terminal actions:
-arrange tagged iTerm/tmux windows, create or focus named tmux targets, and send
-curated argv-based commands to pane `0`.
+# Maestro Command Center
 
 The source of truth is:
 
@@ -10,21 +6,39 @@ The source of truth is:
 maestro/config/palette.json
 ```
 
-The V1 starter config uses one tmux session, `node-dev`, with four windows:
-`website`, `account`, `admin`, and `shell`.
+Schema v2 turns the old button palette into a command center:
+
+- `repos` define workspace roots.
+- `appTargets` define external browser/editor apps by bundle ID.
+- `paneTemplates` define nested tmux pane geometry inside a terminal host.
+- `screenLayouts` place terminal hosts and app zones on the active display.
+- `actions` define safe operations: shell argv, stop, open URL, open repo in
+  editor, and focus surface.
+
+Terminal hosts use `sessionStrategy: "perHost"`. A host named `main` in the
+`node` workspace maps to the tmux session `maestro.node.main`, and panes are
+tagged with `@maestro.repo`, `@maestro.role`, and `@maestro.slot`.
 
 CLI surface:
 
 ```bash
 ./bin/maestro config validate --json
+./bin/maestro layout list --json
+./bin/maestro layout apply terminal-left-third --dry-run --json
+./bin/maestro action list --json
+./bin/maestro action run account.check --dry-run --json
+./bin/maestro pane list --layout terminal-left-third --dry-run --json
+./bin/maestro pane swap main.top main.bottom --layout terminal-left-third --dry-run --json
+```
+
+Compatibility aliases remain:
+
+```bash
 ./bin/maestro button list --json
 ./bin/maestro button run website.dev --dry-run --json
 ```
 
-Command buttons store `argv` arrays. Maestro renders them into shell-safe text
-only at the boundary where `tmux send-keys` sends the command to pane `0`.
-
-Layouts use the visible frame of the display under the mouse. Regions and slot
-units are percentages and have no gaps. Layout application only moves iTerm
-windows tagged by Maestro session variables.
-
+Layouts use the visible frame of the display under the mouse. App zones may
+overlap intentionally, so Browser and VS Code can share the same two-thirds
+frame while macOS app focus decides what is frontmost. Layout application only
+moves Maestro-tagged iTerm windows and the configured external app targets.

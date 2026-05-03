@@ -1,0 +1,609 @@
+import Foundation
+import MaestroCore
+
+public protocol CommandCenterWindowAutomation: Sendable {
+  func activeScreen() -> LayoutScreen
+  func taggedTerminalHostWindows() throws -> [TerminalWindowSnapshot]
+  func createTerminalHostWindow(for host: ResolvedTerminalHost, attachCommand: String) throws
+  func focusTerminalHostWindow(hostID: String) throws
+  func moveTerminalHostWindows(_ framesByHostID: [String: LayoutRect]) throws
+  func focusApp(bundleID: String) throws
+  func openURL(_ url: String, bundleID: String?) throws
+  func openRepo(path: String, bundleID: String) throws
+  func moveAppWindows(_ framesByAppTargetID: [String: LayoutRect], appTargets: [AppTarget]) throws
+}
+
+public protocol CommandCenterConfirmationProviding: Sendable {
+  func confirmBusy(action: CommandCenterActionPlan, currentCommand: String) -> Bool
+  func confirmStop(action: CommandCenterActionPlan) -> Bool
+}
+
+public struct DenyCommandCenterConfirmation: CommandCenterConfirmationProviding {
+  public init() {}
+
+  public func confirmBusy(action: CommandCenterActionPlan, currentCommand: String) -> Bool {
+    false
+  }
+
+  public func confirmStop(action: CommandCenterActionPlan) -> Bool {
+    false
+  }
+}
+
+public struct AllowCommandCenterConfirmation: CommandCenterConfirmationProviding {
+  public init() {}
+
+  public func confirmBusy(action: CommandCenterActionPlan, currentCommand: String) -> Bool {
+    true
+  }
+
+  public func confirmStop(action: CommandCenterActionPlan) -> Bool {
+    true
+  }
+}
+
+public enum CommandCenterRunStatus: String, Codable, Equatable, Sendable {
+  case sent
+  case opened
+  case focused
+  case applied
+  case blocked
+}
+
+public struct CommandCenterRunResult: Codable, Equatable, Sendable {
+  public var ok: Bool
+  public var id: String
+  public var status: CommandCenterRunStatus
+  public var message: String
+
+  public init(ok: Bool, id: String, status: CommandCenterRunStatus, message: String) {
+    self.ok = ok
+    self.id = id
+    self.status = status
+    self.message = message
+  }
+}
+
+public struct CommandCenterRuntime: Sendable {
+  public var config: CommandCenterConfig
+  public var configDirectory: URL
+  public var environment: [String: String]
+  public var tmux: TmuxController
+  public var windows: any CommandCenterWindowAutomation
+  public var stateStore: CommandCenterStateStore
+  public var diagnostics: MaestroDiagnostics
+
+  public init(
+    config: CommandCenterConfig,
+    configDirectory: URL,
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    tmux: TmuxController = TmuxController(),
+    windows: any CommandCenterWindowAutomation = NativeMacAutomation(),
+    stateStore: CommandCenterStateStore? = nil,
+    diagnostics: MaestroDiagnostics? = nil
+  ) {
+    let resolvedDiagnostics: MaestroDiagnostics
+    if let diagnostics {
+      resolvedDiagnostics = diagnostics
+    } else if tmux.diagnostics.isEnabled {
+      resolvedDiagnostics = tmux.diagnostics
+    } else {
+      resolvedDiagnostics = MaestroDiagnostics(options: MaestroDebugOptions(environment: environment))
+    }
+    var resolvedTmux = tmux
+    if diagnostics != nil || !resolvedTmux.diagnostics.isEnabled {
+      resolvedTmux.diagnostics = resolvedDiagnostics
+    }
+    self.config = config
+    self.configDirectory = configDirectory
+    self.environment = environment
+    self.tmux = resolvedTmux
+    self.windows = windows
+    self.stateStore = stateStore ?? CommandCenterStateStore(environment: environment)
+    self.diagnostics = resolvedDiagnostics
+  }
+
+  public func screenLayout(id: String?) throws -> ScreenLayout {
+    let layoutID = id ?? stateStore.load().activeLayoutID ?? config.screenLayouts.first?.id
+    guard let layoutID,
+          let layout = config.screenLayouts.first(where: { $0.id == layoutID }) else {
+      throw CommandCenterConfigError.missingScreenLayout(id ?? "")
+    }
+    return layout
+  }
+
+  public func repo(id: String) throws -> CommandRepo {
+    guard let repo = config.repos.first(where: { $0.id == id }) else {
+      throw CommandCenterConfigError.missingRepo(id)
+    }
+    return repo
+  }
+
+  public func appTarget(id: String) throws -> AppTarget {
+    guard let appTarget = config.appTargets.first(where: { $0.id == id }) else {
+      throw CommandCenterConfigError.missingAppTarget(id)
+    }
+    return appTarget
+  }
+
+  public func resolveRepo(id: String) throws -> ResolvedCommandRepo {
+    let repo = try repo(id: id)
+    return ResolvedCommandRepo(
+      id: repo.id,
+      label: repo.label,
+      cwd: CommandCenterPathResolver(configDirectory: configDirectory, environment: environment)
+        .resolve(repo: repo)
+    )
+  }
+
+  public func resolveHost(hostID: String, layoutID: String? = nil) throws -> ResolvedTerminalHost {
+    let layout = try screenLayout(id: layoutID)
+    guard let host = layout.terminalHosts.first(where: { $0.id == hostID }) else {
+      throw CommandCenterConfigError.missingTerminalHost(hostID)
+    }
+    guard let template = config.paneTemplates.first(where: { $0.id == host.paneTemplateID }) else {
+      throw CommandCenterConfigError.missingPaneTemplate(host.paneTemplateID)
+    }
+    var slotRepos: [String: ResolvedCommandRepo] = [:]
+    for slot in template.slots {
+      let repoID = slot.repoID ?? host.repoID
+      slotRepos[slot.id] = try resolveRepo(id: repoID)
+    }
+    return ResolvedTerminalHost(
+      id: host.id,
+      label: host.label,
+      repo: try resolveRepo(id: host.repoID),
+      sessionName: CommandCenterTmuxNaming.sessionName(workspaceID: config.workspace.id, hostID: host.id),
+      windowName: CommandCenterTmuxNaming.windowName,
+      paneTemplate: template,
+      slotRepos: slotRepos
+    )
+  }
+
+  public func dryRunLayoutPlan(id: String? = nil, screen: LayoutScreen? = nil) throws -> CommandCenterLayoutPlan {
+    let layout = try screenLayout(id: id)
+    return try CommandCenterLayoutPlanner().plan(
+      layout: layout,
+      config: config,
+      screen: screen ?? fallbackScreen()
+    )
+  }
+
+  public func layoutPlan(id: String? = nil) throws -> CommandCenterLayoutPlan {
+    let layout = try screenLayout(id: id)
+    return try CommandCenterLayoutPlanner().plan(
+      layout: layout,
+      config: config,
+      screen: windows.activeScreen(),
+      windows: try windows.taggedTerminalHostWindows()
+    )
+  }
+
+  public func applyLayout(id: String? = nil) throws -> CommandCenterLayoutPlan {
+    diagnostics.emit(
+      level: .info,
+      component: "command_center.runtime",
+      name: "layout.apply.start",
+      message: "Applying layout",
+      context: ["requested_layout_id": id ?? ""]
+    )
+    do {
+      let layout = try screenLayout(id: id)
+      let resolvedHosts = try layout.terminalHosts.map { try resolveHost(hostID: $0.id, layoutID: layout.id) }
+      var sessionsByHostID: [String: String] = [:]
+      for host in resolvedHosts {
+        let plan = try tmux.ensureHost(host)
+        sessionsByHostID[host.id] = plan.host.sessionName
+      }
+
+      let screen = windows.activeScreen()
+      var tagged = try windows.taggedTerminalHostWindows()
+      var plan = try CommandCenterLayoutPlanner().plan(
+        layout: layout,
+        config: config,
+        screen: screen,
+        windows: tagged
+      )
+
+      let missingIDs = Set(plan.missingHostIDs)
+      for host in resolvedHosts where missingIDs.contains(host.id) {
+        try windows.createTerminalHostWindow(for: host, attachCommand: attachCommand(for: host))
+      }
+
+      if !missingIDs.isEmpty {
+        tagged = try waitForTaggedHostWindows(hostIDs: missingIDs, existing: tagged)
+        plan = try CommandCenterLayoutPlanner().plan(
+          layout: layout,
+          config: config,
+          screen: screen,
+          windows: tagged
+        )
+      }
+
+      var framesByHostID: [String: LayoutRect] = [:]
+      for host in plan.terminalHosts {
+        framesByHostID[host.hostID] = host.frame
+      }
+      try windows.moveTerminalHostWindows(framesByHostID)
+
+      let appFrames = appFramesByTargetID(plan: plan)
+      let appTargets = plan.appZones.flatMap { zone in
+        zone.appTargetIDs.compactMap { id in config.appTargets.first { $0.id == id } }
+      }
+      try windows.moveAppWindows(appFrames, appTargets: appTargets)
+
+      try stateStore.save(CommandCenterState(
+        activeLayoutID: layout.id,
+        hostSessions: sessionsByHostID
+      ))
+      diagnostics.emit(
+        level: .info,
+        component: "command_center.runtime",
+        name: "layout.apply.success",
+        message: "Applied layout",
+        context: [
+          "layout_id": layout.id,
+          "host_count": String(plan.terminalHosts.count),
+          "app_zone_count": String(plan.appZones.count),
+          "missing_host_count": String(missingIDs.count)
+        ]
+      )
+      return plan
+    } catch {
+      var context = MaestroDiagnostics.safeErrorContext(error)
+      context["requested_layout_id"] = id ?? ""
+      diagnostics.emit(
+        level: .error,
+        component: "command_center.runtime",
+        name: "layout.apply.failure",
+        message: "Layout apply failed",
+        context: context
+      )
+      throw error
+    }
+  }
+
+  public func actionPlan(id: String, layoutID: String? = nil) throws -> CommandCenterActionPlan {
+    guard let action = config.actions.first(where: { $0.id == id }) else {
+      throw CommandCenterConfigError.missingAction(id)
+    }
+
+    switch action.kind {
+    case .shellArgv:
+      guard let argv = action.argv, !argv.isEmpty else {
+        throw CommandCenterConfigError.missingActionArgv(action.id)
+      }
+      let display = ShellCommandRenderer.render(argv)
+      let paneTarget = try paneTarget(for: action, layoutID: layoutID)
+      return CommandCenterActionPlan(
+        actionID: action.id,
+        label: action.label,
+        kind: action.kind,
+        displayCommand: display,
+        targetPane: paneTarget,
+        tmuxCommand: TmuxCommand(arguments: ["send-keys", "-t", paneTarget, display, "C-m"])
+      )
+    case .stop:
+      let paneTarget = try paneTarget(for: action, layoutID: layoutID)
+      return CommandCenterActionPlan(
+        actionID: action.id,
+        label: action.label,
+        kind: action.kind,
+        targetPane: paneTarget,
+        tmuxCommand: TmuxCommand(arguments: ["send-keys", "-t", paneTarget, "C-c"])
+      )
+    case .openURL:
+      guard let url = action.url, !url.isEmpty else {
+        throw CommandCenterConfigError.missingActionURL(action.id)
+      }
+      let app = try action.appTargetID.map { try appTarget(id: $0) }
+      return CommandCenterActionPlan(
+        actionID: action.id,
+        label: action.label,
+        kind: action.kind,
+        url: url,
+        appTarget: app
+      )
+    case .openRepoInEditor:
+      guard let repoID = action.repoID else {
+        throw CommandCenterConfigError.missingRepo("")
+      }
+      let repo = try resolveRepo(id: repoID)
+      let app = try action.appTargetID.map { try appTarget(id: $0) }
+      return CommandCenterActionPlan(
+        actionID: action.id,
+        label: action.label,
+        kind: action.kind,
+        repoPath: repo.cwd,
+        appTarget: app
+      )
+    case .focusSurface:
+      let app = try action.appTargetID.map { try appTarget(id: $0) }
+      return CommandCenterActionPlan(
+        actionID: action.id,
+        label: action.label,
+        kind: action.kind,
+        appTarget: app
+      )
+    case .codexPrompt:
+      let paneTarget = try paneTarget(for: action, layoutID: layoutID)
+      return CommandCenterActionPlan(
+        actionID: action.id,
+        label: action.label,
+        kind: action.kind,
+        targetPane: paneTarget
+      )
+    }
+  }
+
+  public func runAction(
+    id: String,
+    layoutID: String? = nil,
+    confirmation: any CommandCenterConfirmationProviding
+  ) throws -> CommandCenterRunResult {
+    diagnostics.emit(
+      level: .info,
+      component: "command_center.runtime",
+      name: "action.start",
+      message: "Running action",
+      context: [
+        "action_id": id,
+        "layout_id": layoutID ?? ""
+      ]
+    )
+    do {
+      let action = try requireAction(id)
+      let plan = try actionPlan(id: id, layoutID: layoutID)
+      var context = actionContext(action: action, plan: plan, layoutID: layoutID)
+
+      switch action.kind {
+      case .shellArgv:
+        if let hostID = action.hostID {
+          _ = try tmux.ensureHost(resolveHost(hostID: hostID, layoutID: layoutID))
+        }
+        let currentCommand = try tmux.paneCurrentCommand(paneTarget: plan.targetPane ?? "")
+        if !ShellProcessClassifier.isShell(currentCommand) {
+          guard confirmation.confirmBusy(action: plan, currentCommand: currentCommand) else {
+            context["status"] = CommandCenterRunStatus.blocked.rawValue
+            context["block_reason"] = "busy_pane"
+            emitActionBlocked(context: context)
+            return CommandCenterRunResult(ok: false, id: id, status: .blocked, message: "blocked")
+          }
+        }
+        if let command = plan.tmuxCommand {
+          try tmux.run(command)
+        }
+        context["status"] = CommandCenterRunStatus.sent.rawValue
+        emitActionSuccess(context: context)
+        return CommandCenterRunResult(ok: true, id: id, status: .sent, message: "sent")
+      case .stop:
+        guard confirmation.confirmStop(action: plan) else {
+          context["status"] = CommandCenterRunStatus.blocked.rawValue
+          context["block_reason"] = "confirmation_denied"
+          emitActionBlocked(context: context)
+          return CommandCenterRunResult(ok: false, id: id, status: .blocked, message: "blocked")
+        }
+        if let command = plan.tmuxCommand {
+          try tmux.run(command)
+        }
+        context["status"] = CommandCenterRunStatus.sent.rawValue
+        emitActionSuccess(context: context)
+        return CommandCenterRunResult(ok: true, id: id, status: .sent, message: "sent")
+      case .openURL:
+        try windows.openURL(plan.url ?? "", bundleID: plan.appTarget?.bundleID)
+        context["status"] = CommandCenterRunStatus.opened.rawValue
+        emitActionSuccess(context: context)
+        return CommandCenterRunResult(ok: true, id: id, status: .opened, message: "opened")
+      case .openRepoInEditor:
+        guard let repoPath = plan.repoPath,
+              let bundleID = plan.appTarget?.bundleID else {
+          throw CommandCenterConfigError.missingAppTarget(action.appTargetID ?? "")
+        }
+        try windows.openRepo(path: repoPath, bundleID: bundleID)
+        context["status"] = CommandCenterRunStatus.opened.rawValue
+        emitActionSuccess(context: context)
+        return CommandCenterRunResult(ok: true, id: id, status: .opened, message: "opened")
+      case .focusSurface:
+        if let hostID = action.hostID {
+          try windows.focusTerminalHostWindow(hostID: hostID)
+        }
+        if let bundleID = plan.appTarget?.bundleID {
+          try windows.focusApp(bundleID: bundleID)
+        }
+        context["status"] = CommandCenterRunStatus.focused.rawValue
+        emitActionSuccess(context: context)
+        return CommandCenterRunResult(ok: true, id: id, status: .focused, message: "focused")
+      case .codexPrompt:
+        context["status"] = CommandCenterRunStatus.blocked.rawValue
+        context["block_reason"] = "not_executable"
+        emitActionBlocked(context: context)
+        return CommandCenterRunResult(ok: false, id: id, status: .blocked, message: "codex prompt actions are planned but not executable in this milestone")
+      }
+    } catch {
+      var context = MaestroDiagnostics.safeErrorContext(error)
+      context["action_id"] = id
+      context["layout_id"] = layoutID ?? ""
+      diagnostics.emit(
+        level: .error,
+        component: "command_center.runtime",
+        name: "action.failure",
+        message: "Action failed",
+        context: context
+      )
+      throw error
+    }
+  }
+
+  public func configuredPaneBindings(layoutID: String? = nil) throws -> [CommandCenterPaneBinding] {
+    let layout = try screenLayout(id: layoutID)
+    return try layout.terminalHosts.flatMap { host -> [CommandCenterPaneBinding] in
+      let resolved = try resolveHost(hostID: host.id, layoutID: layout.id)
+      return resolved.paneTemplate.slots.enumerated().map { index, slot in
+        CommandCenterPaneBinding(
+          layoutID: layout.id,
+          hostID: host.id,
+          slotID: slot.id,
+          role: slot.role,
+          repoID: slot.repoID ?? host.repoID,
+          paneTarget: "\(resolved.tmuxWindowTarget).\(index)"
+        )
+      }
+    }
+  }
+
+  public func livePaneList(layoutID: String? = nil) throws -> [LiveTmuxPaneSnapshot] {
+    let layout = try screenLayout(id: layoutID)
+    let sessions = layout.terminalHosts.map {
+      CommandCenterTmuxNaming.sessionName(workspaceID: config.workspace.id, hostID: $0.id)
+    }
+    return try tmux.listMaestroPanes(sessions: sessions)
+  }
+
+  public func paneOperationPlan(
+    kind: CommandCenterPaneOperationKind,
+    source: CommandCenterPaneRef,
+    destination: CommandCenterPaneRef,
+    layoutID: String? = nil
+  ) throws -> CommandCenterPaneOperationPlan {
+    let sourceHost = try resolveHost(hostID: source.hostID, layoutID: layoutID)
+    let destinationHost = try resolveHost(hostID: destination.hostID, layoutID: layoutID)
+    let sourcePane = try sourceHost.paneTarget(slotID: source.slotID)
+    let destinationPane = try destinationHost.paneTarget(slotID: destination.slotID)
+    let commandName = kind == .swap ? "swap-pane" : "move-pane"
+    var commands = [
+      TmuxCommand(arguments: [commandName, "-s", sourcePane, "-t", destinationPane])
+    ]
+    let planner = CommandCenterTmuxPlanner()
+    commands.append(contentsOf: planner.tagCommands(host: sourceHost))
+    if sourceHost.id != destinationHost.id {
+      commands.append(contentsOf: planner.tagCommands(host: destinationHost))
+    }
+    if let layout = planner.layoutCommand(host: sourceHost) {
+      commands.append(layout)
+    }
+    if sourceHost.id != destinationHost.id, let layout = planner.layoutCommand(host: destinationHost) {
+      commands.append(layout)
+    }
+    return CommandCenterPaneOperationPlan(
+      kind: kind,
+      source: source,
+      destination: destination,
+      sourcePaneTarget: sourcePane,
+      destinationPaneTarget: destinationPane,
+      commands: commands
+    )
+  }
+
+  public func runPaneOperation(
+    kind: CommandCenterPaneOperationKind,
+    source: CommandCenterPaneRef,
+    destination: CommandCenterPaneRef,
+    layoutID: String? = nil
+  ) throws -> CommandCenterPaneOperationPlan {
+    let plan = try paneOperationPlan(kind: kind, source: source, destination: destination, layoutID: layoutID)
+    try tmux.run(plan.commands)
+    return plan
+  }
+
+  private func paneTarget(for action: CommandCenterAction, layoutID: String?) throws -> String {
+    guard let hostID = action.hostID, let slotID = action.slotID else {
+      throw CommandCenterConfigError.missingPaneSlot(hostID: action.hostID ?? "", slotID: action.slotID ?? "")
+    }
+    return try resolveHost(hostID: hostID, layoutID: layoutID).paneTarget(slotID: slotID)
+  }
+
+  private func requireAction(_ id: String) throws -> CommandCenterAction {
+    guard let action = config.actions.first(where: { $0.id == id }) else {
+      throw CommandCenterConfigError.missingAction(id)
+    }
+    return action
+  }
+
+  private func actionContext(
+    action: CommandCenterAction,
+    plan: CommandCenterActionPlan,
+    layoutID: String?
+  ) -> [String: String] {
+    var context: [String: String] = [
+      "action_id": action.id,
+      "kind": action.kind.rawValue,
+      "layout_id": layoutID ?? ""
+    ]
+    if let hostID = action.hostID {
+      context["host_id"] = hostID
+    }
+    if let slotID = action.slotID {
+      context["slot_id"] = slotID
+    }
+    if let targetPane = plan.targetPane {
+      context["target_pane"] = targetPane
+    }
+    if let appTarget = plan.appTarget {
+      context["app_target_id"] = appTarget.id
+      context["bundle_id"] = appTarget.bundleID
+    }
+    return context
+  }
+
+  private func emitActionSuccess(context: [String: String]) {
+    diagnostics.emit(
+      level: .info,
+      component: "command_center.runtime",
+      name: "action.success",
+      message: "Action completed",
+      context: context
+    )
+  }
+
+  private func emitActionBlocked(context: [String: String]) {
+    diagnostics.emit(
+      level: .warning,
+      component: "command_center.runtime",
+      name: "action.blocked",
+      message: "Action was blocked",
+      context: context
+    )
+  }
+
+  private func waitForTaggedHostWindows(
+    hostIDs: Set<String>,
+    existing: [TerminalWindowSnapshot]
+  ) throws -> [TerminalWindowSnapshot] {
+    let deadline = Date().addingTimeInterval(5)
+    var latest = existing
+    while Date() < deadline {
+      let present = Set(latest.compactMap(\.targetID))
+      if hostIDs.isSubset(of: present) {
+        return latest
+      }
+      Thread.sleep(forTimeInterval: 0.1)
+      latest = try windows.taggedTerminalHostWindows()
+    }
+    return latest
+  }
+
+  private func appFramesByTargetID(plan: CommandCenterLayoutPlan) -> [String: LayoutRect] {
+    var frames: [String: LayoutRect] = [:]
+    for zone in plan.appZones {
+      for appTargetID in zone.appTargetIDs {
+        frames[appTargetID] = zone.frame
+      }
+    }
+    return frames
+  }
+
+  private func attachCommand(for host: ResolvedTerminalHost) -> String {
+    let cwd = ShellCommandRenderer.quote(host.repo.cwd)
+    let tmuxTarget = ShellCommandRenderer.quote(host.tmuxWindowTarget)
+    return "cd \(cwd) && tmux attach-session -t \(tmuxTarget)"
+  }
+
+  private func fallbackScreen() -> LayoutScreen {
+    LayoutScreen(
+      id: "dry-run",
+      name: "Dry Run",
+      frame: LayoutRect(x: 0, y: 0, width: 1440, height: 900),
+      visibleFrame: LayoutRect(x: 0, y: 0, width: 1440, height: 900)
+    )
+  }
+}

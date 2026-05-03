@@ -20,6 +20,7 @@ public struct PaletteConfig: Codable, Equatable, Sendable {
   public var layouts: [TerminalLayout]
   public var buttons: [CommandButton]
   public var sections: [DeckSection]
+  public var profiles: [PaletteProfile]?
 
   public init(
     schemaVersion: Int,
@@ -28,7 +29,8 @@ public struct PaletteConfig: Codable, Equatable, Sendable {
     regions: [LayoutRegion],
     layouts: [TerminalLayout],
     buttons: [CommandButton],
-    sections: [DeckSection]
+    sections: [DeckSection],
+    profiles: [PaletteProfile]? = nil
   ) {
     self.schemaVersion = schemaVersion
     self.roots = roots
@@ -37,6 +39,7 @@ public struct PaletteConfig: Codable, Equatable, Sendable {
     self.layouts = layouts
     self.buttons = buttons
     self.sections = sections
+    self.profiles = profiles
   }
 }
 
@@ -152,6 +155,28 @@ public struct DeckSection: Codable, Identifiable, Equatable, Sendable {
     self.id = id
     self.label = label
     self.buttonIDs = buttonIDs
+  }
+}
+
+public struct PaletteProfile: Codable, Identifiable, Equatable, Sendable {
+  public var id: String
+  public var label: String
+  public var layoutIDs: [String]
+  public var targetIDs: [String]
+  public var sectionIDs: [String]
+
+  public init(
+    id: String,
+    label: String,
+    layoutIDs: [String],
+    targetIDs: [String],
+    sectionIDs: [String]
+  ) {
+    self.id = id
+    self.label = label
+    self.layoutIDs = layoutIDs
+    self.targetIDs = targetIDs
+    self.sectionIDs = sectionIDs
   }
 }
 
@@ -336,4 +361,3 @@ public enum PaletteConfigError: Error, LocalizedError, Equatable {
     }
   }
 }
-

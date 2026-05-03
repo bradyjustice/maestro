@@ -1,392 +1,479 @@
 {
-  "schemaVersion": 1,
-  "roots": [
+  "actions": [
     {
-      "id": "node",
-      "path": "~/Documents/Coding/node"
+      "argv": [
+        "npm",
+        "run",
+        "dev"
+      ],
+      "hostID": "main",
+      "id": "website.dev",
+      "kind": "shellArgv",
+      "label": "Website Dev",
+      "slotID": "top"
     },
     {
-      "id": "maestro",
-      "path": "../.."
+      "argv": [
+        "npm",
+        "run",
+        "dev"
+      ],
+      "hostID": "main",
+      "id": "account.dev",
+      "kind": "shellArgv",
+      "label": "Account Dev",
+      "slotID": "bottom"
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "check"
+      ],
+      "hostID": "main",
+      "id": "website.check",
+      "kind": "shellArgv",
+      "label": "Website Check",
+      "slotID": "top"
+    },
+    {
+      "argv": [
+        "npm",
+        "run",
+        "check"
+      ],
+      "hostID": "main",
+      "id": "account.check",
+      "kind": "shellArgv",
+      "label": "Account Check",
+      "slotID": "bottom"
+    },
+    {
+      "appTargetID": "browser",
+      "id": "browser.open.website",
+      "kind": "openURL",
+      "label": "Open Website",
+      "url": "http://localhost:3000"
+    },
+    {
+      "appTargetID": "editor",
+      "id": "editor.open.website",
+      "kind": "openRepoInEditor",
+      "label": "Open Website Repo",
+      "repoID": "website"
+    },
+    {
+      "appTargetID": "browser",
+      "id": "browser.focus",
+      "kind": "focusSurface",
+      "label": "Focus Browser"
+    },
+    {
+      "appTargetID": "editor",
+      "id": "editor.focus",
+      "kind": "focusSurface",
+      "label": "Focus Editor"
+    },
+    {
+      "hostID": "main",
+      "id": "terminal.focus",
+      "kind": "focusSurface",
+      "label": "Focus Terminal"
+    },
+    {
+      "hostID": "main",
+      "id": "website.stop",
+      "kind": "stop",
+      "label": "Stop Website",
+      "slotID": "top"
+    },
+    {
+      "hostID": "main",
+      "id": "account.stop",
+      "kind": "stop",
+      "label": "Stop Account",
+      "slotID": "bottom"
     }
   ],
-  "targets": [
+  "appTargets": [
+    {
+      "bundleID": "com.apple.Safari",
+      "defaultURL": "http://localhost:3000",
+      "id": "browser",
+      "label": "Browser",
+      "role": "browser"
+    },
+    {
+      "bundleID": "com.microsoft.VSCode",
+      "id": "editor",
+      "label": "VS Code",
+      "role": "editor"
+    }
+  ],
+  "paneTemplates": [
+    {
+      "id": "work-stack",
+      "label": "Work Stack",
+      "slots": [
+        {
+          "id": "top",
+          "label": "Website",
+          "repoID": "website",
+          "role": "website",
+          "unit": {
+            "height": 0.5,
+            "width": 1,
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "bottom",
+          "label": "Account",
+          "repoID": "account",
+          "role": "account",
+          "unit": {
+            "height": 0.5,
+            "width": 1,
+            "x": 0,
+            "y": 0.5
+          }
+        }
+      ]
+    },
+    {
+      "id": "ops-stack",
+      "label": "Ops Stack",
+      "slots": [
+        {
+          "id": "top",
+          "label": "Admin",
+          "repoID": "admin",
+          "role": "admin",
+          "unit": {
+            "height": 0.5,
+            "width": 1,
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "bottom",
+          "label": "Maestro",
+          "repoID": "maestro",
+          "role": "shell",
+          "unit": {
+            "height": 0.5,
+            "width": 1,
+            "x": 0,
+            "y": 0.5
+          }
+        }
+      ]
+    },
+    {
+      "id": "quad",
+      "label": "Quad",
+      "slots": [
+        {
+          "id": "top-left",
+          "label": "Website",
+          "repoID": "website",
+          "role": "website",
+          "unit": {
+            "height": 0.5,
+            "width": 0.5,
+            "x": 0,
+            "y": 0
+          }
+        },
+        {
+          "id": "top-right",
+          "label": "Account",
+          "repoID": "account",
+          "role": "account",
+          "unit": {
+            "height": 0.5,
+            "width": 0.5,
+            "x": 0.5,
+            "y": 0
+          }
+        },
+        {
+          "id": "bottom-left",
+          "label": "Admin",
+          "repoID": "admin",
+          "role": "admin",
+          "unit": {
+            "height": 0.5,
+            "width": 0.5,
+            "x": 0,
+            "y": 0.5
+          }
+        },
+        {
+          "id": "bottom-right",
+          "label": "Maestro",
+          "repoID": "maestro",
+          "role": "shell",
+          "unit": {
+            "height": 0.5,
+            "width": 0.5,
+            "x": 0.5,
+            "y": 0.5
+          }
+        }
+      ]
+    },
+    {
+      "id": "single",
+      "label": "Single",
+      "slots": [
+        {
+          "id": "main",
+          "label": "Maestro",
+          "repoID": "maestro",
+          "role": "shell",
+          "unit": {
+            "height": 1,
+            "width": 1,
+            "x": 0,
+            "y": 0
+          }
+        }
+      ]
+    }
+  ],
+  "profiles": [
+    {
+      "actionSectionIDs": [
+        "dev",
+        "checks",
+        "surfaces",
+        "stop"
+      ],
+      "appTargetIDs": [
+        "browser",
+        "editor"
+      ],
+      "id": "command-center",
+      "label": "Command Center",
+      "layoutIDs": [
+        "terminal-left-third",
+        "terminal-right-third",
+        "dual-half-stacks",
+        "quad-full",
+        "single-full"
+      ]
+    }
+  ],
+  "repos": [
     {
       "id": "website",
       "label": "Website",
-      "session": "node-dev",
-      "window": "website",
-      "pane": 0,
-      "root": "node",
-      "path": "node_website"
+      "path": "~/Documents/Coding/node/node_website"
     },
     {
       "id": "account",
       "label": "Account",
-      "session": "node-dev",
-      "window": "account",
-      "pane": 0,
-      "root": "node",
-      "path": "node_account"
+      "path": "~/Documents/Coding/node/node_account"
     },
     {
       "id": "admin",
       "label": "Admin",
-      "session": "node-dev",
-      "window": "admin",
-      "pane": 0,
-      "root": "node",
-      "path": "node_admin"
+      "path": "~/Documents/Coding/node/node_admin"
     },
     {
-      "id": "shell",
-      "label": "Shell",
-      "session": "node-dev",
-      "window": "shell",
-      "pane": 0,
-      "root": "node",
-      "path": ""
+      "id": "maestro",
+      "label": "Maestro",
+      "path": "../.."
     }
   ],
-  "regions": [
+  "schemaVersion": 2,
+  "screenLayouts": [
     {
-      "id": "full",
-      "label": "Full",
-      "container": {
-        "x": 0,
-        "y": 0,
-        "width": 1,
-        "height": 1
-      }
-    },
-    {
-      "id": "left-half",
-      "label": "Left Half",
-      "container": {
-        "x": 0,
-        "y": 0,
-        "width": 0.5,
-        "height": 1
-      }
-    },
-    {
-      "id": "left-third",
-      "label": "Left Third",
-      "container": {
-        "x": 0,
-        "y": 0,
-        "width": 0.3333333333,
-        "height": 1
-      }
-    }
-  ],
-  "layouts": [
-    {
-      "id": "stack.full",
-      "label": "Stack Full",
-      "region": "full",
-      "slots": [
+      "appZones": [
         {
-          "id": "top",
-          "target": "website",
-          "unit": {
-            "x": 0,
-            "y": 0,
-            "width": 1,
-            "height": 0.5
-          }
-        },
+          "appTargetIDs": [
+            "browser",
+            "editor"
+          ],
+          "frame": {
+            "height": 1,
+            "width": 0.6666666667,
+            "x": 0.3333333333,
+            "y": 0
+          },
+          "id": "work-surface",
+          "label": "Browser and Editor"
+        }
+      ],
+      "id": "terminal-left-third",
+      "label": "Terminal Left Third",
+      "terminalHosts": [
         {
-          "id": "bottom",
-          "target": "shell",
-          "unit": {
+          "frame": {
+            "height": 1,
+            "width": 0.3333333333,
             "x": 0,
-            "y": 0.5,
-            "width": 1,
-            "height": 0.5
-          }
+            "y": 0
+          },
+          "id": "main",
+          "label": "Main Terminal",
+          "paneTemplateID": "work-stack",
+          "repoID": "website",
+          "sessionStrategy": "perHost"
         }
       ]
     },
     {
-      "id": "stack.left-half",
-      "label": "Stack Half",
-      "region": "left-half",
-      "slots": [
+      "appZones": [
         {
-          "id": "top",
-          "target": "website",
-          "unit": {
+          "appTargetIDs": [
+            "browser",
+            "editor"
+          ],
+          "frame": {
+            "height": 1,
+            "width": 0.6666666667,
             "x": 0,
-            "y": 0,
-            "width": 1,
-            "height": 0.5
-          }
-        },
+            "y": 0
+          },
+          "id": "work-surface",
+          "label": "Browser and Editor"
+        }
+      ],
+      "id": "terminal-right-third",
+      "label": "Terminal Right Third",
+      "terminalHosts": [
         {
-          "id": "bottom",
-          "target": "shell",
-          "unit": {
-            "x": 0,
-            "y": 0.5,
-            "width": 1,
-            "height": 0.5
-          }
+          "frame": {
+            "height": 1,
+            "width": 0.3333333333,
+            "x": 0.6666666667,
+            "y": 0
+          },
+          "id": "main",
+          "label": "Main Terminal",
+          "paneTemplateID": "work-stack",
+          "repoID": "website",
+          "sessionStrategy": "perHost"
         }
       ]
     },
     {
-      "id": "stack.left-third",
-      "label": "Stack Third",
-      "region": "left-third",
-      "slots": [
+      "appZones": [],
+      "id": "dual-half-stacks",
+      "label": "Dual Half Stacks",
+      "terminalHosts": [
         {
-          "id": "top",
-          "target": "website",
-          "unit": {
+          "frame": {
+            "height": 1,
+            "width": 0.5,
             "x": 0,
-            "y": 0,
-            "width": 1,
-            "height": 0.5
-          }
+            "y": 0
+          },
+          "id": "left",
+          "label": "Work Terminal",
+          "paneTemplateID": "work-stack",
+          "repoID": "website",
+          "sessionStrategy": "perHost"
         },
         {
-          "id": "bottom",
-          "target": "shell",
-          "unit": {
-            "x": 0,
-            "y": 0.5,
-            "width": 1,
-            "height": 0.5
-          }
+          "frame": {
+            "height": 1,
+            "width": 0.5,
+            "x": 0.5,
+            "y": 0
+          },
+          "id": "right",
+          "label": "Ops Terminal",
+          "paneTemplateID": "ops-stack",
+          "repoID": "admin",
+          "sessionStrategy": "perHost"
         }
       ]
     },
     {
-      "id": "quad.full",
+      "appZones": [],
+      "id": "quad-full",
       "label": "Quad Full",
-      "region": "full",
-      "slots": [
+      "terminalHosts": [
         {
-          "id": "top-left",
-          "target": "website",
-          "unit": {
+          "frame": {
+            "height": 1,
+            "width": 1,
             "x": 0,
-            "y": 0,
-            "width": 0.5,
-            "height": 0.5
-          }
-        },
-        {
-          "id": "top-right",
-          "target": "account",
-          "unit": {
-            "x": 0.5,
-            "y": 0,
-            "width": 0.5,
-            "height": 0.5
-          }
-        },
-        {
-          "id": "bottom-left",
-          "target": "admin",
-          "unit": {
-            "x": 0,
-            "y": 0.5,
-            "width": 0.5,
-            "height": 0.5
-          }
-        },
-        {
-          "id": "bottom-right",
-          "target": "shell",
-          "unit": {
-            "x": 0.5,
-            "y": 0.5,
-            "width": 0.5,
-            "height": 0.5
-          }
+            "y": 0
+          },
+          "id": "main",
+          "label": "Main Terminal",
+          "paneTemplateID": "quad",
+          "repoID": "website",
+          "sessionStrategy": "perHost"
         }
       ]
     },
     {
-      "id": "quad.left-half",
-      "label": "Quad Half",
-      "region": "left-half",
-      "slots": [
+      "appZones": [],
+      "id": "single-full",
+      "label": "Single Full",
+      "terminalHosts": [
         {
-          "id": "top-left",
-          "target": "website",
-          "unit": {
+          "frame": {
+            "height": 1,
+            "width": 1,
             "x": 0,
-            "y": 0,
-            "width": 0.5,
-            "height": 0.5
-          }
-        },
-        {
-          "id": "top-right",
-          "target": "account",
-          "unit": {
-            "x": 0.5,
-            "y": 0,
-            "width": 0.5,
-            "height": 0.5
-          }
-        },
-        {
-          "id": "bottom-left",
-          "target": "admin",
-          "unit": {
-            "x": 0,
-            "y": 0.5,
-            "width": 0.5,
-            "height": 0.5
-          }
-        },
-        {
-          "id": "bottom-right",
-          "target": "shell",
-          "unit": {
-            "x": 0.5,
-            "y": 0.5,
-            "width": 0.5,
-            "height": 0.5
-          }
+            "y": 0
+          },
+          "id": "main",
+          "label": "Main Terminal",
+          "paneTemplateID": "single",
+          "repoID": "maestro",
+          "sessionStrategy": "perHost"
         }
       ]
-    },
-    {
-      "id": "quad.left-third",
-      "label": "Quad Third",
-      "region": "left-third",
-      "slots": [
-        {
-          "id": "top-left",
-          "target": "website",
-          "unit": {
-            "x": 0,
-            "y": 0,
-            "width": 0.5,
-            "height": 0.5
-          }
-        },
-        {
-          "id": "top-right",
-          "target": "account",
-          "unit": {
-            "x": 0.5,
-            "y": 0,
-            "width": 0.5,
-            "height": 0.5
-          }
-        },
-        {
-          "id": "bottom-left",
-          "target": "admin",
-          "unit": {
-            "x": 0,
-            "y": 0.5,
-            "width": 0.5,
-            "height": 0.5
-          }
-        },
-        {
-          "id": "bottom-right",
-          "target": "shell",
-          "unit": {
-            "x": 0.5,
-            "y": 0.5,
-            "width": 0.5,
-            "height": 0.5
-          }
-        }
-      ]
-    }
-  ],
-  "buttons": [
-    {
-      "id": "website.dev",
-      "label": "Web Dev",
-      "kind": "command",
-      "target": "website",
-      "argv": ["npm", "run", "dev"]
-    },
-    {
-      "id": "account.dev",
-      "label": "Acct Dev",
-      "kind": "command",
-      "target": "account",
-      "argv": ["npm", "run", "dev"]
-    },
-    {
-      "id": "admin.dev",
-      "label": "Admin Dev",
-      "kind": "command",
-      "target": "admin",
-      "argv": ["npm", "run", "dev"]
-    },
-    {
-      "id": "website.check",
-      "label": "Web Check",
-      "kind": "command",
-      "target": "website",
-      "argv": ["npm", "run", "check"]
-    },
-    {
-      "id": "account.check",
-      "label": "Acct Check",
-      "kind": "command",
-      "target": "account",
-      "argv": ["npm", "run", "check"]
-    },
-    {
-      "id": "website.stop",
-      "label": "Website",
-      "kind": "stop",
-      "target": "website"
-    },
-    {
-      "id": "account.stop",
-      "label": "Account",
-      "kind": "stop",
-      "target": "account"
-    },
-    {
-      "id": "admin.stop",
-      "label": "Admin",
-      "kind": "stop",
-      "target": "admin"
-    },
-    {
-      "id": "shell.stop",
-      "label": "Shell",
-      "kind": "stop",
-      "target": "shell"
     }
   ],
   "sections": [
     {
-      "id": "commands",
-      "label": "Commands",
-      "buttonIDs": [
+      "actionIDs": [
         "website.dev",
-        "account.dev",
-        "admin.dev",
-        "website.check",
-        "account.check"
-      ]
+        "account.dev"
+      ],
+      "id": "dev",
+      "label": "Dev"
     },
     {
-      "id": "stop",
-      "label": "Stop",
-      "buttonIDs": [
+      "actionIDs": [
+        "website.check",
+        "account.check"
+      ],
+      "id": "checks",
+      "label": "Checks"
+    },
+    {
+      "actionIDs": [
+        "browser.open.website",
+        "editor.open.website",
+        "browser.focus",
+        "editor.focus",
+        "terminal.focus"
+      ],
+      "id": "surfaces",
+      "label": "Surfaces"
+    },
+    {
+      "actionIDs": [
         "website.stop",
-        "account.stop",
-        "admin.stop",
-        "shell.stop"
-      ]
+        "account.stop"
+      ],
+      "id": "stop",
+      "label": "Stop"
     }
-  ]
+  ],
+  "workspace": {
+    "id": "node",
+    "label": "Node Workspace"
+  }
 }
-

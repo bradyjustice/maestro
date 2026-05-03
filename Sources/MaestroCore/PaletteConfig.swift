@@ -116,6 +116,66 @@ public struct PalettePathResolver {
   }
 }
 
+public struct PaletteProfileResolution: Equatable, Sendable {
+  public var activeProfile: PaletteProfile?
+  public var layouts: [TerminalLayout]
+  public var targets: [TerminalTarget]
+  public var sections: [DeckSection]
+
+  public init(
+    activeProfile: PaletteProfile?,
+    layouts: [TerminalLayout],
+    targets: [TerminalTarget],
+    sections: [DeckSection]
+  ) {
+    self.activeProfile = activeProfile
+    self.layouts = layouts
+    self.targets = targets
+    self.sections = sections
+  }
+}
+
+public struct PaletteProfileResolver {
+  public init() {}
+
+  public func selectedProfile(in config: PaletteConfig, activeProfileID: String?) -> PaletteProfile? {
+    guard let profiles = config.profiles, !profiles.isEmpty else {
+      return nil
+    }
+    if let activeProfileID,
+       let profile = profiles.first(where: { $0.id == activeProfileID }) {
+      return profile
+    }
+    return profiles[0]
+  }
+
+  public func resolve(config: PaletteConfig, activeProfileID: String?) -> PaletteProfileResolution {
+    guard let profile = selectedProfile(in: config, activeProfileID: activeProfileID) else {
+      return PaletteProfileResolution(
+        activeProfile: nil,
+        layouts: config.layouts,
+        targets: config.targets,
+        sections: config.sections
+      )
+    }
+
+    return PaletteProfileResolution(
+      activeProfile: profile,
+      layouts: ordered(profile.layoutIDs, from: config.layouts),
+      targets: ordered(profile.targetIDs, from: config.targets),
+      sections: ordered(profile.sectionIDs, from: config.sections)
+    )
+  }
+
+  private func ordered<T: Identifiable>(_ ids: [String], from values: [T]) -> [T] where T.ID == String {
+    var byID: [String: T] = [:]
+    for value in values where byID[value.id] == nil {
+      byID[value.id] = value
+    }
+    return ids.compactMap { byID[$0] }
+  }
+}
+
 public struct PaletteValidator {
   public init() {}
 
@@ -132,11 +192,14 @@ public struct PaletteValidator {
     validateUnique(config.layouts.map(\.id), "layout", &issues)
     validateUnique(config.buttons.map(\.id), "button", &issues)
     validateUnique(config.sections.map(\.id), "section", &issues)
+    validateUnique(config.profiles?.map(\.id) ?? [], "profile", &issues)
 
     let rootIDs = Set(config.roots.map(\.id))
     let targetIDs = Set(config.targets.map(\.id))
     let regionIDs = Set(config.regions.map(\.id))
+    let layoutIDs = Set(config.layouts.map(\.id))
     let buttonIDs = Set(config.buttons.map(\.id))
+    let sectionIDs = Set(config.sections.map(\.id))
 
     if config.roots.isEmpty {
       issues.append(issue("missing_roots", "palette.json must define at least one root."))
@@ -208,6 +271,22 @@ public struct PaletteValidator {
       }
     }
 
+    for profile in config.profiles ?? [] {
+      validateUnique(profile.layoutIDs, "profile layout in \(profile.id)", &issues)
+      validateUnique(profile.targetIDs, "profile target in \(profile.id)", &issues)
+      validateUnique(profile.sectionIDs, "profile section in \(profile.id)", &issues)
+
+      for layoutID in profile.layoutIDs where !layoutIDs.contains(layoutID) {
+        issues.append(issue("unknown_profile_layout", "Profile \(profile.id) references unknown layout \(layoutID)."))
+      }
+      for targetID in profile.targetIDs where !targetIDs.contains(targetID) {
+        issues.append(issue("unknown_profile_target", "Profile \(profile.id) references unknown target \(targetID)."))
+      }
+      for sectionID in profile.sectionIDs where !sectionIDs.contains(sectionID) {
+        issues.append(issue("unknown_profile_section", "Profile \(profile.id) references unknown section \(sectionID)."))
+      }
+    }
+
     return PaletteValidationResult(issues: issues)
   }
 
@@ -244,4 +323,3 @@ public func nonEmpty(_ value: String?) -> String? {
   }
   return value
 }
-

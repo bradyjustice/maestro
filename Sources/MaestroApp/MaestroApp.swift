@@ -4,8 +4,8 @@ import MaestroCore
 import SwiftUI
 
 @main
-struct MaestroPaletteApp: App {
-  @NSApplicationDelegateAdaptor(PaletteAppDelegate.self) private var appDelegate
+struct MaestroCommandCenterApp: App {
+  @NSApplicationDelegateAdaptor(CommandCenterAppDelegate.self) private var appDelegate
 
   var body: some Scene {
     Settings {
@@ -15,14 +15,14 @@ struct MaestroPaletteApp: App {
 }
 
 @MainActor
-final class PaletteAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class CommandCenterAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
   private var window: NSWindow?
-  private let defaultsKeyX = "MaestroPaletteWindowX"
-  private let defaultsKeyY = "MaestroPaletteWindowY"
+  private let defaultsKeyX = "MaestroCommandCenterWindowX"
+  private let defaultsKeyY = "MaestroCommandCenterWindowY"
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.accessory)
-    showPalette()
+    showCommandCenter()
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -37,15 +37,13 @@ final class PaletteAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     UserDefaults.standard.set(frame.origin.y, forKey: defaultsKeyY)
   }
 
-  private func showPalette() {
-    let model = PaletteViewModel()
+  private func showCommandCenter() {
+    let model = CommandCenterViewModel()
     model.load()
 
-    let content = PaletteView(model: model)
-    let size = NSSize(width: 340, height: 560)
-    let origin = savedOrigin(defaultSize: size)
+    let size = NSSize(width: 980, height: 620)
     let window = NSWindow(
-      contentRect: NSRect(origin: origin, size: size),
+      contentRect: NSRect(origin: savedOrigin(defaultSize: size), size: size),
       styleMask: [.titled, .closable, .fullSizeContentView],
       backing: .buffered,
       defer: false
@@ -55,8 +53,8 @@ final class PaletteAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     window.isReleasedWhenClosed = false
     window.delegate = self
-    window.contentView = NSHostingView(rootView: content)
-    window.minSize = NSSize(width: 300, height: 420)
+    window.contentView = NSHostingView(rootView: CommandCenterView(model: model))
+    window.minSize = NSSize(width: 820, height: 520)
     window.standardWindowButton(.zoomButton)?.isHidden = true
     window.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
@@ -65,11 +63,9 @@ final class PaletteAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
   private func savedOrigin(defaultSize: NSSize) -> NSPoint {
     let defaults = UserDefaults.standard
-    let hasSaved = defaults.object(forKey: defaultsKeyX) != nil && defaults.object(forKey: defaultsKeyY) != nil
-    if hasSaved {
+    if defaults.object(forKey: defaultsKeyX) != nil && defaults.object(forKey: defaultsKeyY) != nil {
       return NSPoint(x: defaults.double(forKey: defaultsKeyX), y: defaults.double(forKey: defaultsKeyY))
     }
-
     guard let screen = NSScreen.main else {
       return NSPoint(x: 80, y: 80)
     }
@@ -81,75 +77,175 @@ final class PaletteAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 }
 
 @MainActor
-final class PaletteViewModel: ObservableObject {
-  @Published var config: PaletteConfig?
+final class CommandCenterViewModel: ObservableObject {
+  @Published var config: CommandCenterConfig?
   @Published var loadError: String?
-  @Published var statusByID: [String: PaletteActionStatus] = [:]
+  @Published var selectedProfileID: String?
+  @Published var selectedLayoutID: String?
+  @Published var selectedMode: CommandCenterMode = .map
+  @Published var statusByID: [String: CommandCenterActionStatus] = [:]
   @Published var isRunning: Set<String> = []
+  @Published var lastMessage = "Idle"
+  @Published var migratedFromSchemaVersion: Int?
 
   private var configFileURL: URL?
+  private let defaultsKeyProfile = "MaestroCommandCenterActiveProfileID"
+  private let defaultsKeyLayout = "MaestroCommandCenterActiveLayoutID"
+  private let environment: [String: String]
+  let diagnostics: MaestroDiagnostics
+
+  init(environment: [String: String] = ProcessInfo.processInfo.environment) {
+    self.environment = environment
+    self.diagnostics = MaestroDiagnostics(options: MaestroDebugOptions(environment: environment))
+  }
+
+  var visibleConfig: CommandCenterProfileResolution? {
+    guard let config else {
+      return nil
+    }
+    return CommandCenterProfileResolver().resolve(config: config, activeProfileID: selectedProfileID)
+  }
+
+  var selectedLayout: ScreenLayout? {
+    guard let config else {
+      return nil
+    }
+    let visibleLayouts = visibleConfig?.layouts ?? config.screenLayouts
+    if let selectedLayoutID,
+       let layout = visibleLayouts.first(where: { $0.id == selectedLayoutID }) {
+      return layout
+    }
+    return visibleLayouts.first
+  }
 
   func load() {
+    diagnostics.emit(
+      level: .info,
+      component: "command_center.view_model",
+      name: "config.load.start",
+      message: "Loading command center config"
+    )
     do {
-      let fileURL = MaestroPaths.defaultConfigFile()
-      let data = try Data(contentsOf: fileURL)
-      let config = try MaestroJSON.decoder.decode(PaletteConfig.self, from: data)
-      let validation = PaletteValidator().validate(config)
-      guard validation.ok else {
-        throw PaletteConfigError.invalidConfig(validation.issues)
-      }
-      let configChanged = self.config != config
-      self.config = config
-      self.configFileURL = fileURL
-      self.loadError = nil
+      let loaded = try CommandCenterConfigLoader(environment: environment).load()
+      let configChanged = config != loaded.config
+      config = loaded.config
+      configFileURL = loaded.fileURL
+      migratedFromSchemaVersion = loaded.migratedFromSchemaVersion
+      loadError = nil
+      reconcileSelection(for: loaded.config)
       if configChanged {
-        self.statusByID = [:]
-        self.isRunning = []
+        statusByID = [:]
+        isRunning = []
       }
+      lastMessage = loaded.migratedFromSchemaVersion == nil ? "Config loaded" : "Legacy config migrated"
+      diagnostics.emit(
+        level: .info,
+        component: "command_center.view_model",
+        name: "config.load.success",
+        message: "Loaded command center config",
+        context: [
+          "workspace_id": loaded.config.workspace.id,
+          "schema_version": String(loaded.config.schemaVersion),
+          "layout_count": String(loaded.config.screenLayouts.count),
+          "action_count": String(loaded.config.actions.count),
+          "migrated_from_schema_version": loaded.migratedFromSchemaVersion.map(String.init) ?? ""
+        ]
+      )
     } catch {
-      self.config = nil
-      self.configFileURL = nil
-      self.loadError = error.localizedDescription
+      config = nil
+      configFileURL = nil
+      selectedProfileID = nil
+      selectedLayoutID = nil
+      migratedFromSchemaVersion = nil
+      loadError = error.localizedDescription
+      lastMessage = "Config error"
+      diagnostics.emit(
+        level: .error,
+        component: "command_center.view_model",
+        name: "config.load.failure",
+        message: "Command center config load failed",
+        context: MaestroDiagnostics.safeErrorContext(error)
+      )
     }
   }
 
-  func applyLayout(_ layout: TerminalLayout) {
+  func selectProfile(id: String) {
+    guard let config,
+          let profile = CommandCenterProfileResolver().selectedProfile(in: config, activeProfileID: id) else {
+      selectedProfileID = nil
+      UserDefaults.standard.removeObject(forKey: defaultsKeyProfile)
+      diagnostics.emit(
+        level: .warning,
+        component: "command_center.view_model",
+        name: "profile.select.failure",
+        message: "Profile selection failed",
+        context: ["profile_id": id]
+      )
+      return
+    }
+    selectedProfileID = profile.id
+    UserDefaults.standard.set(profile.id, forKey: defaultsKeyProfile)
+    reconcileLayout(for: config)
+    diagnostics.emit(
+      level: .info,
+      component: "command_center.view_model",
+      name: "profile.select.success",
+      message: "Selected profile",
+      context: ["profile_id": profile.id]
+    )
+  }
+
+  func selectLayout(id: String) {
+    selectedLayoutID = id
+    UserDefaults.standard.set(id, forKey: defaultsKeyLayout)
+    diagnostics.emit(
+      level: .info,
+      component: "command_center.view_model",
+      name: "layout.select.success",
+      message: "Selected layout",
+      context: ["layout_id": id]
+    )
+  }
+
+  func applySelectedLayout() {
+    guard let layout = selectedLayout else {
+      return
+    }
     run(id: layout.id, role: .layout) { runtime in
       _ = try runtime.applyLayout(id: layout.id)
-      return .succeeded
+      return .succeeded("Applied \(layout.label)")
     }
   }
 
-  func focusTarget(_ target: TerminalTarget) {
-    run(id: target.id, role: .target) { runtime in
-      try runtime.focusTarget(id: target.id)
-      return .succeeded
-    }
-  }
-
-  func runButton(_ button: CommandButton) {
-    let role = PaletteActionRole(buttonKind: button.kind)
-    run(id: button.id, role: role) { runtime in
-      let result = try runtime.runButton(id: button.id, confirmation: PaletteAppConfirmation())
-      return result.ok ? .succeeded : .canceled
+  func runAction(_ action: CommandCenterAction) {
+    let layoutID = selectedLayoutID
+    run(id: action.id, role: .action(action.kind)) { runtime in
+      let result = try runtime.runAction(id: action.id, layoutID: layoutID, confirmation: NativeCommandCenterConfirmation())
+      return result.ok ? .succeeded(result.message) : .canceled(result.message)
     }
   }
 
   private func run(
     id: String,
-    role: PaletteActionRole,
-    operation: @escaping @Sendable (PaletteRuntime) throws -> PaletteRunOutcome
+    role: CommandCenterActionRole,
+    operation: @escaping @Sendable (CommandCenterRuntime) throws -> CommandCenterRunOutcome
   ) {
     guard let config, let configFileURL else {
-      statusByID[id] = .failed(detail: "Palette configuration is not loaded.")
+      statusByID[id] = .failed("Configuration is not loaded.")
+      lastMessage = "Configuration is not loaded."
       return
     }
 
-    statusByID[id] = .running(role: role)
+    statusByID[id] = .running(role)
     isRunning.insert(id)
-    let runtime = PaletteRuntime(
+    lastMessage = role.runningMessage
+    let runtime = CommandCenterRuntime(
       config: config,
-      configDirectory: configFileURL.deletingLastPathComponent()
+      configDirectory: configFileURL.deletingLastPathComponent(),
+      environment: environment,
+      tmux: TmuxController(diagnostics: diagnostics),
+      windows: NativeMacAutomation(diagnostics: diagnostics),
+      diagnostics: diagnostics
     )
 
     Task.detached {
@@ -157,83 +253,123 @@ final class PaletteViewModel: ObservableObject {
         let outcome = try operation(runtime)
         await MainActor.run {
           switch outcome {
-          case .succeeded:
-            self.statusByID[id] = .succeeded(role: role)
-          case .canceled:
-            self.statusByID[id] = .canceled()
+          case let .succeeded(message):
+            self.statusByID[id] = .succeeded(role, message: message)
+            self.lastMessage = message
+          case let .canceled(message):
+            self.statusByID[id] = .canceled(message)
+            self.lastMessage = message
           }
           self.isRunning.remove(id)
         }
       } catch {
         await MainActor.run {
-          self.statusByID[id] = .failed(detail: error.localizedDescription)
+          self.statusByID[id] = .failed(error.localizedDescription)
+          self.lastMessage = error.localizedDescription
           self.isRunning.remove(id)
         }
       }
     }
   }
-}
 
-enum PaletteActionRole: Equatable, Sendable {
-  case layout
-  case target
-  case command
-  case stop
+  private func reconcileSelection(for config: CommandCenterConfig) {
+    let resolver = CommandCenterProfileResolver()
+    if let profile = resolver.selectedProfile(
+      in: config,
+      activeProfileID: selectedProfileID ?? UserDefaults.standard.string(forKey: defaultsKeyProfile)
+    ) {
+      selectedProfileID = profile.id
+      UserDefaults.standard.set(profile.id, forKey: defaultsKeyProfile)
+    } else {
+      selectedProfileID = nil
+      UserDefaults.standard.removeObject(forKey: defaultsKeyProfile)
+    }
+    reconcileLayout(for: config)
+  }
 
-  init(buttonKind: CommandButtonKind) {
-    switch buttonKind {
-    case .command:
-      self = .command
-    case .stop:
-      self = .stop
+  private func reconcileLayout(for config: CommandCenterConfig) {
+    let visibleLayouts = visibleConfig?.layouts ?? config.screenLayouts
+    let saved = selectedLayoutID ?? UserDefaults.standard.string(forKey: defaultsKeyLayout)
+    if let saved, visibleLayouts.contains(where: { $0.id == saved }) {
+      selectedLayoutID = saved
+      UserDefaults.standard.set(saved, forKey: defaultsKeyLayout)
+      return
+    }
+    selectedLayoutID = visibleLayouts.first?.id
+    if let selectedLayoutID {
+      UserDefaults.standard.set(selectedLayoutID, forKey: defaultsKeyLayout)
     }
   }
+}
+
+enum CommandCenterMode: String, CaseIterable, Identifiable {
+  case map = "Map"
+  case settings = "Settings"
+
+  var id: String { rawValue }
+  var systemImage: String {
+    switch self {
+    case .map:
+      return "rectangle.3.group"
+    case .settings:
+      return "slider.horizontal.3"
+    }
+  }
+}
+
+enum CommandCenterActionRole: Equatable, Sendable {
+  case layout
+  case action(CommandCenterActionKind)
 
   var runningMessage: String {
     switch self {
     case .layout:
-      return "Arranging"
-    case .target:
-      return "Opening"
-    case .command:
-      return "Sending"
-    case .stop:
-      return "Stopping"
+      return "Arranging layout"
+    case let .action(kind):
+      switch kind {
+      case .shellArgv, .codexPrompt:
+        return "Sending command"
+      case .stop:
+        return "Stopping pane"
+      case .openURL, .openRepoInEditor:
+        return "Opening"
+      case .focusSurface:
+        return "Focusing"
+      }
     }
   }
 
-  var successMessage: String {
-    switch self {
-    case .layout:
-      return "Arranged"
-    case .target:
-      return "Ready"
-    case .command:
-      return "Sent"
-    case .stop:
-      return "Stopped"
-    }
-  }
-
-  var idleSystemImage: String {
+  var systemImage: String {
     switch self {
     case .layout:
       return "rectangle.3.group"
-    case .target:
-      return "terminal"
-    case .command:
-      return "play.fill"
-    case .stop:
-      return "stop.fill"
+    case let .action(kind):
+      switch kind {
+      case .shellArgv:
+        return "play.fill"
+      case .stop:
+        return "stop.fill"
+      case .openURL:
+        return "safari"
+      case .openRepoInEditor:
+        return "curlybraces"
+      case .focusSurface:
+        return "scope"
+      case .codexPrompt:
+        return "text.cursor"
+      }
     }
   }
 
   var isDestructive: Bool {
-    self == .stop
+    if case let .action(kind) = self {
+      return kind == .stop
+    }
+    return false
   }
 }
 
-enum PaletteActionPhase: Equatable, Sendable {
+enum CommandCenterActionPhase: Equatable, Sendable {
   case idle
   case running
   case succeeded
@@ -241,277 +377,412 @@ enum PaletteActionPhase: Equatable, Sendable {
   case failed
 }
 
-struct PaletteActionStatus: Equatable, Sendable {
-  var phase: PaletteActionPhase
+struct CommandCenterActionStatus: Equatable, Sendable {
+  var phase: CommandCenterActionPhase
   var message: String
-  var detail: String?
 
-  static func running(role: PaletteActionRole) -> PaletteActionStatus {
-    PaletteActionStatus(phase: .running, message: role.runningMessage, detail: nil)
+  static func running(_ role: CommandCenterActionRole) -> CommandCenterActionStatus {
+    CommandCenterActionStatus(phase: .running, message: role.runningMessage)
   }
 
-  static func succeeded(role: PaletteActionRole) -> PaletteActionStatus {
-    PaletteActionStatus(phase: .succeeded, message: role.successMessage, detail: nil)
+  static func succeeded(_ role: CommandCenterActionRole, message: String) -> CommandCenterActionStatus {
+    CommandCenterActionStatus(phase: .succeeded, message: message.isEmpty ? "Done" : message)
   }
 
-  static func canceled() -> PaletteActionStatus {
-    PaletteActionStatus(phase: .canceled, message: "Canceled", detail: nil)
+  static func canceled(_ message: String) -> CommandCenterActionStatus {
+    CommandCenterActionStatus(phase: .canceled, message: message.isEmpty ? "Canceled" : message)
   }
 
-  static func failed(detail: String?) -> PaletteActionStatus {
-    PaletteActionStatus(phase: .failed, message: "Needs attention", detail: detail)
-  }
-}
-
-private enum PaletteRunOutcome: Sendable {
-  case succeeded
-  case canceled
-}
-
-final class PaletteAppConfirmation: PaletteConfirmationProviding {
-  init() {}
-
-  func confirmBusy(target: ResolvedTerminalTarget, command: String, currentCommand: String) -> Bool {
-    let displayCommand = command.isEmpty ? "this command" : command
-    return ask(
-      title: "Pane Busy",
-      message: "\(target.label) is running \(currentCommand).\n\nSend \(displayCommand) anyway?",
-      primary: "Send"
-    )
-  }
-
-  func confirmStop(target: ResolvedTerminalTarget) -> Bool {
-    ask(
-      title: "Stop \(target.label)?",
-      message: "Send Control-C to \(target.session):\(target.window).\(target.pane)?",
-      primary: "Stop"
-    )
-  }
-
-  private func ask(title: String, message: String, primary: String) -> Bool {
-    let run = {
-      MainActor.assumeIsolated {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: primary)
-        alert.addButton(withTitle: "Cancel")
-        return alert.runModal() == .alertFirstButtonReturn
-      }
-    }
-
-    if Thread.isMainThread {
-      return run()
-    }
-    return DispatchQueue.main.sync(execute: run)
+  static func failed(_ message: String) -> CommandCenterActionStatus {
+    CommandCenterActionStatus(phase: .failed, message: message)
   }
 }
 
-struct PaletteView: View {
-  @ObservedObject var model: PaletteViewModel
+private enum CommandCenterRunOutcome: Sendable {
+  case succeeded(String)
+  case canceled(String)
+}
+
+struct CommandCenterView: View {
+  @ObservedObject var model: CommandCenterViewModel
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      header
-
+    VStack(spacing: 0) {
       if let loadError = model.loadError {
-        PaletteLoadErrorView(detail: loadError) {
+        CommandCenterLoadErrorView(detail: loadError) {
           model.load()
         }
-      } else if let config = model.config {
-        ScrollView {
-          VStack(alignment: .leading, spacing: 12) {
-            PaletteSection(title: "Layouts") {
-              buttonGrid(config.layouts) { layout in
-                PaletteActionButton(
-                  title: layout.label,
-                  role: .layout,
-                  status: model.statusByID[layout.id],
-                  running: model.isRunning.contains(layout.id),
-                  help: "Arrange \(layout.label)"
-                ) {
-                  model.applyLayout(layout)
-                }
-              }
-            }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else if let config = model.config, let visible = model.visibleConfig {
+        HStack(spacing: 0) {
+          leftRail(config: config, visible: visible)
+          Divider()
+          centerSurface(config: config)
+          Divider()
+          inspector(config: config, visible: visible)
+        }
+        Divider()
+        statusStrip(config: config)
+      }
+    }
+    .frame(minWidth: 820, minHeight: 520)
+    .background(.regularMaterial)
+  }
 
-            PaletteSection(title: "Targets") {
-              buttonGrid(config.targets) { target in
-                PaletteActionButton(
-                  title: target.label,
-                  role: .target,
-                  status: model.statusByID[target.id],
-                  running: model.isRunning.contains(target.id),
-                  help: "Open or focus \(target.label)"
-                ) {
-                  model.focusTarget(target)
-                }
-              }
-            }
+  private func leftRail(config: CommandCenterConfig, visible: CommandCenterProfileResolution) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack {
+        Text("Maestro")
+          .font(.headline)
+        Spacer()
+        Button {
+          model.load()
+        } label: {
+          Image(systemName: "arrow.clockwise")
+        }
+        .buttonStyle(.borderless)
+        .help("Reload")
+      }
 
-            let commandButtons = config.buttons.filter { $0.kind == .command }
-            PaletteSection(title: "Commands") {
-              buttonGrid(commandButtons) { button in
-                PaletteActionButton(
-                  title: button.label,
-                  role: .command,
-                  status: model.statusByID[button.id],
-                  running: model.isRunning.contains(button.id),
-                  help: commandHelp(for: button)
-                ) {
-                  model.runButton(button)
-                }
-              }
-            }
+      if let profiles = config.profiles, !profiles.isEmpty {
+        Picker("Profile", selection: Binding<String>(
+          get: { model.selectedProfileID ?? profiles[0].id },
+          set: { model.selectProfile(id: $0) }
+        )) {
+          ForEach(profiles) { profile in
+            Text(profile.label).tag(profile.id)
+          }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+      }
 
-            let stopButtons = config.buttons.filter { $0.kind == .stop }
-            PaletteSection(title: "Stop") {
-              buttonGrid(stopButtons) { button in
-                PaletteActionButton(
-                  title: button.label,
-                  role: .stop,
-                  status: model.statusByID[button.id],
-                  running: model.isRunning.contains(button.id),
-                  help: "Send Control-C to \(button.label)"
-                ) {
-                  model.runButton(button)
+      Picker("Mode", selection: $model.selectedMode) {
+        ForEach(CommandCenterMode.allCases) { mode in
+          Label(mode.rawValue, systemImage: mode.systemImage).tag(mode)
+        }
+      }
+      .pickerStyle(.segmented)
+      .labelsHidden()
+
+      Text("Layouts")
+        .font(.caption)
+        .fontWeight(.semibold)
+        .foregroundStyle(.secondary)
+
+      ScrollView {
+        VStack(alignment: .leading, spacing: 6) {
+          ForEach(visible.layouts) { layout in
+            RailButton(
+              title: layout.label,
+              subtitle: "\(layout.terminalHosts.count) host\(layout.terminalHosts.count == 1 ? "" : "s")",
+              systemImage: "rectangle.split.3x1",
+              selected: model.selectedLayoutID == layout.id
+            ) {
+              model.selectLayout(id: layout.id)
+            }
+          }
+        }
+      }
+
+      Spacer(minLength: 0)
+    }
+    .padding(12)
+    .frame(width: 210, alignment: .topLeading)
+    .background(Color(nsColor: .windowBackgroundColor).opacity(0.42))
+  }
+
+  @ViewBuilder
+  private func centerSurface(config: CommandCenterConfig) -> some View {
+    VStack(alignment: .leading, spacing: 0) {
+      if model.selectedMode == .map {
+        VStack(alignment: .leading, spacing: 14) {
+          HStack {
+            VStack(alignment: .leading, spacing: 2) {
+              Text(model.selectedLayout?.label ?? "Layout")
+                .font(.title3)
+                .fontWeight(.semibold)
+              Text(config.workspace.label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button {
+              model.applySelectedLayout()
+            } label: {
+              Label("Apply", systemImage: "play.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(model.selectedLayout == nil || model.isRunning.contains(model.selectedLayoutID ?? ""))
+          }
+          if let layout = model.selectedLayout {
+            ScreenMapView(layout: layout, config: config)
+          }
+        }
+        .padding(16)
+      } else {
+        SettingsTabs(config: config)
+          .padding(12)
+      }
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    .background(Color(nsColor: .textBackgroundColor).opacity(0.24))
+  }
+
+  private func inspector(config: CommandCenterConfig, visible: CommandCenterProfileResolution) -> some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 16) {
+        if let layout = model.selectedLayout {
+          InspectorSection(title: "Layout") {
+            InspectorRow(label: "ID", value: layout.id)
+            InspectorRow(label: "Terminal Hosts", value: "\(layout.terminalHosts.count)")
+            InspectorRow(label: "App Zones", value: "\(layout.appZones.count)")
+          }
+
+          InspectorSection(title: "Hosts") {
+            ForEach(layout.terminalHosts) { host in
+              let template = config.paneTemplates.first { $0.id == host.paneTemplateID }
+              InspectorRow(label: host.label, value: template?.label ?? host.paneTemplateID)
+            }
+          }
+        }
+
+        ForEach(visible.sections) { section in
+          let actions = actions(in: section, config: config)
+          if !actions.isEmpty {
+            InspectorSection(title: section.label) {
+              VStack(spacing: 7) {
+                ForEach(actions) { action in
+                  ActionRowButton(
+                    action: action,
+                    status: model.statusByID[action.id],
+                    running: model.isRunning.contains(action.id)
+                  ) {
+                    model.runAction(action)
+                  }
                 }
               }
             }
           }
-          .frame(maxWidth: .infinity, alignment: .topLeading)
         }
       }
+      .padding(12)
     }
-    .padding(14)
-    .frame(minWidth: 300, idealWidth: 340, maxWidth: .infinity, minHeight: 420, maxHeight: .infinity, alignment: .topLeading)
-    .background(Color(nsColor: .windowBackgroundColor))
+    .frame(width: 270, alignment: .topLeading)
+    .background(Color(nsColor: .windowBackgroundColor).opacity(0.38))
   }
 
-  private var header: some View {
-    HStack {
-      Text("Maestro")
-        .font(.headline)
+  private func statusStrip(config: CommandCenterConfig) -> some View {
+    HStack(spacing: 12) {
+      Label(model.selectedLayoutID ?? "No layout", systemImage: "rectangle.3.group")
+      if let layout = model.selectedLayout {
+        let sessions = layout.terminalHosts
+          .map { CommandCenterTmuxNaming.sessionName(workspaceID: config.workspace.id, hostID: $0.id) }
+          .joined(separator: ", ")
+        Label(sessions.isEmpty ? "No terminal sessions" : sessions, systemImage: "terminal")
+      }
+      if let migrated = model.migratedFromSchemaVersion {
+        Label("Migrated v\(migrated)", systemImage: "arrow.triangle.2.circlepath")
+      }
+      if model.diagnostics.isEnabled {
+        Label("Debug", systemImage: "record.circle")
+      }
       Spacer()
-      Button {
-        model.load()
-      } label: {
-        Image(systemName: "arrow.clockwise")
-      }
-      .buttonStyle(.borderless)
-      .help("Reload palette config")
+      Text(model.lastMessage)
+        .lineLimit(1)
+        .truncationMode(.middle)
     }
+    .font(.caption)
+    .foregroundStyle(.secondary)
+    .padding(.horizontal, 12)
+    .padding(.vertical, 7)
   }
 
-  private func commandHelp(for button: CommandButton) -> String {
-    guard let argv = button.argv, !argv.isEmpty else {
-      return "Run \(button.label)"
+  private func actions(in section: CommandCenterSection, config: CommandCenterConfig) -> [CommandCenterAction] {
+    var byID: [String: CommandCenterAction] = [:]
+    for action in config.actions where byID[action.id] == nil {
+      byID[action.id] = action
     }
-    return "Run \(ShellCommandRenderer.render(argv))"
-  }
-
-  private func buttonGrid<Data: RandomAccessCollection, Content: View>(
-    _ data: Data,
-    @ViewBuilder content: @escaping (Data.Element) -> Content
-  ) -> some View where Data.Element: Identifiable {
-    LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], alignment: .leading, spacing: 8) {
-      ForEach(data) { item in
-        content(item)
-      }
-    }
+    return section.actionIDs.compactMap { byID[$0] }
   }
 }
 
-struct PaletteSection<Content: View>: View {
+struct RailButton: View {
   var title: String
-  @ViewBuilder var content: Content
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: 6) {
-      Text(title)
-        .font(.caption)
-        .fontWeight(.semibold)
-        .foregroundStyle(.secondary)
-      content
-    }
-    .frame(maxWidth: .infinity, alignment: .leading)
-  }
-}
-
-struct PaletteLoadErrorView: View {
-  var detail: String
-  var reload: () -> Void
-
-  var body: some View {
-    HStack(alignment: .top, spacing: 10) {
-      Image(systemName: "exclamationmark.triangle.fill")
-        .foregroundStyle(.orange)
-        .frame(width: 18)
-
-      VStack(alignment: .leading, spacing: 8) {
-        Text("Palette config could not load")
-          .font(.callout)
-          .fontWeight(.semibold)
-        Text(detail)
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
-
-        Button(action: reload) {
-          Label("Reload", systemImage: "arrow.clockwise")
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .help("Reload palette config")
-      }
-      .frame(maxWidth: .infinity, alignment: .leading)
-    }
-    .padding(10)
-    .background(Color.orange.opacity(0.08))
-    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-    .overlay(
-      RoundedRectangle(cornerRadius: 6, style: .continuous)
-        .stroke(Color.orange.opacity(0.18), lineWidth: 1)
-    )
-  }
-}
-
-struct PaletteActionButton: View {
-  var title: String
-  var role: PaletteActionRole
-  var status: PaletteActionStatus?
-  var running: Bool
-  var help: String
+  var subtitle: String
+  var systemImage: String
+  var selected: Bool
   var action: () -> Void
 
   var body: some View {
     Button(action: action) {
-      VStack(alignment: .leading, spacing: 6) {
-        HStack(spacing: 6) {
-          Image(systemName: systemImage)
-            .frame(width: 16)
-            .foregroundStyle(iconColor)
+      HStack(spacing: 8) {
+        Image(systemName: systemImage)
+          .frame(width: 18)
+        VStack(alignment: .leading, spacing: 1) {
           Text(title)
-            .font(.callout)
             .lineLimit(1)
-            .minimumScaleFactor(0.8)
-            .truncationMode(.tail)
-            .layoutPriority(1)
-          Spacer(minLength: 0)
+          Text(subtitle)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
         }
-        if let status {
-          Text(status.message)
+        Spacer(minLength: 0)
+      }
+      .padding(.horizontal, 8)
+      .padding(.vertical, 7)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .background(selected ? Color.accentColor.opacity(0.14) : Color.clear)
+    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+  }
+}
+
+struct ScreenMapView: View {
+  var layout: ScreenLayout
+  var config: CommandCenterConfig
+
+  var body: some View {
+    GeometryReader { proxy in
+      let size = proxy.size
+      ZStack(alignment: .topLeading) {
+        RoundedRectangle(cornerRadius: 7, style: .continuous)
+          .fill(Color(nsColor: .windowBackgroundColor).opacity(0.72))
+        RoundedRectangle(cornerRadius: 7, style: .continuous)
+          .stroke(Color(nsColor: .separatorColor).opacity(0.7), lineWidth: 1)
+
+        ForEach(layout.appZones) { zone in
+          ZoneRect(rect: zone.frame, in: size) {
+            VStack(alignment: .leading, spacing: 5) {
+              Label(zone.label, systemImage: "macwindow")
+                .font(.caption)
+                .fontWeight(.semibold)
+              ForEach(zone.appTargetIDs, id: \.self) { appID in
+                Text(config.appTargets.first { $0.id == appID }?.label ?? appID)
+                  .font(.caption2)
+                  .foregroundStyle(.secondary)
+              }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+          }
+          .background(Color(nsColor: .controlBackgroundColor).opacity(0.75))
+          .overlay(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+              .stroke(Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 1)
+          )
+        }
+
+        ForEach(layout.terminalHosts) { host in
+          ZoneRect(rect: host.frame, in: size) {
+            TerminalHostPreview(host: host, config: config)
+          }
+          .background(Color.accentColor.opacity(0.13))
+          .overlay(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+              .stroke(Color.accentColor.opacity(0.55), lineWidth: 1)
+          )
+        }
+      }
+    }
+    .aspectRatio(16 / 10, contentMode: .fit)
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+  }
+}
+
+struct ZoneRect<Content: View>: View {
+  var rect: PercentRect
+  var size: CGSize
+  @ViewBuilder var content: Content
+
+  init(rect: PercentRect, in size: CGSize, @ViewBuilder content: () -> Content) {
+    self.rect = rect
+    self.size = size
+    self.content = content()
+  }
+
+  var body: some View {
+    content
+      .frame(width: max(1, size.width * rect.width), height: max(1, size.height * rect.height), alignment: .topLeading)
+      .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+      .position(x: size.width * (rect.x + rect.width / 2), y: size.height * (rect.y + rect.height / 2))
+  }
+}
+
+struct TerminalHostPreview: View {
+  var host: TerminalHost
+  var config: CommandCenterConfig
+
+  var body: some View {
+    GeometryReader { proxy in
+      let template = config.paneTemplates.first { $0.id == host.paneTemplateID }
+      ZStack(alignment: .topLeading) {
+        VStack(alignment: .leading, spacing: 3) {
+          Label(host.label, systemImage: "terminal")
+            .font(.caption)
+            .fontWeight(.semibold)
+          Text(CommandCenterTmuxNaming.sessionName(workspaceID: config.workspace.id, hostID: host.id))
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+        .padding(8)
+        .zIndex(2)
+
+        if let template {
+          ForEach(template.slots) { slot in
+            ZoneRect(rect: slot.unit, in: proxy.size) {
+              VStack(alignment: .leading, spacing: 3) {
+                Text(slot.label)
+                  .font(.caption)
+                  .fontWeight(.medium)
+                Text(slot.role)
+                  .font(.caption2)
+                  .foregroundStyle(.secondary)
+              }
+              .padding(7)
+              .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+            }
+            .background(Color(nsColor: .textBackgroundColor).opacity(0.32))
+            .overlay(
+              RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .stroke(Color.white.opacity(0.24), lineWidth: 1)
+            )
+          }
+        }
+      }
+    }
+  }
+}
+
+struct ActionRowButton: View {
+  var action: CommandCenterAction
+  var status: CommandCenterActionStatus?
+  var running: Bool
+  var run: () -> Void
+
+  var body: some View {
+    Button(action: run) {
+      HStack(spacing: 8) {
+        Image(systemName: role.systemImage)
+          .frame(width: 18)
+          .foregroundStyle(iconColor)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(action.label)
+            .lineLimit(1)
+          Text(status?.message ?? action.kind.rawValue)
             .font(.caption2)
             .foregroundStyle(statusColor)
             .lineLimit(1)
-            .minimumScaleFactor(0.8)
-            .truncationMode(.tail)
         }
+        Spacer(minLength: 0)
       }
-      .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
       .padding(.horizontal, 8)
       .padding(.vertical, 7)
+      .frame(maxWidth: .infinity, alignment: .leading)
       .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
@@ -522,25 +793,14 @@ struct PaletteActionButton: View {
         .stroke(borderColor, lineWidth: 1)
     )
     .disabled(running)
-    .help(effectiveHelp)
   }
 
-  private var phase: PaletteActionPhase {
-    if running {
-      return .running
-    }
-    return status?.phase ?? .idle
+  private var role: CommandCenterActionRole {
+    .action(action.kind)
   }
 
-  private var systemImage: String {
-    switch phase {
-    case .running:
-      return "hourglass"
-    case .failed:
-      return "exclamationmark.triangle.fill"
-    case .idle, .succeeded, .canceled:
-      return role.idleSystemImage
-    }
+  private var phase: CommandCenterActionPhase {
+    running ? .running : status?.phase ?? .idle
   }
 
   private var iconColor: Color {
@@ -579,10 +839,8 @@ struct PaletteActionButton: View {
       return Color.green.opacity(0.07)
     case .running:
       return (role.isDestructive ? Color.red : Color.accentColor).opacity(0.10)
-    case .canceled:
-      return Color(nsColor: .controlBackgroundColor)
-    case .idle:
-      return role.isDestructive ? Color.red.opacity(0.10) : Color(nsColor: .controlBackgroundColor)
+    case .canceled, .idle:
+      return role.isDestructive ? Color.red.opacity(0.08) : Color(nsColor: .controlBackgroundColor).opacity(0.7)
     }
   }
 
@@ -594,17 +852,107 @@ struct PaletteActionButton: View {
       return Color.green.opacity(0.28)
     case .running:
       return (role.isDestructive ? Color.red : Color.accentColor).opacity(0.32)
-    case .canceled:
-      return Color(nsColor: .separatorColor).opacity(0.45)
-    case .idle:
-      return role.isDestructive ? Color.red.opacity(0.28) : Color(nsColor: .separatorColor).opacity(0.45)
+    case .canceled, .idle:
+      return role.isDestructive ? Color.red.opacity(0.25) : Color(nsColor: .separatorColor).opacity(0.45)
     }
   }
+}
 
-  private var effectiveHelp: String {
-    if phase == .failed, let detail = status?.detail, !detail.isEmpty {
-      return detail
+struct InspectorSection<Content: View>: View {
+  var title: String
+  @ViewBuilder var content: Content
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 7) {
+      Text(title)
+        .font(.caption)
+        .fontWeight(.semibold)
+        .foregroundStyle(.secondary)
+      content
     }
-    return help
+    .frame(maxWidth: .infinity, alignment: .leading)
+  }
+}
+
+struct InspectorRow: View {
+  var label: String
+  var value: String
+
+  var body: some View {
+    HStack(alignment: .firstTextBaseline) {
+      Text(label)
+        .foregroundStyle(.secondary)
+      Spacer()
+      Text(value)
+        .lineLimit(1)
+        .truncationMode(.middle)
+    }
+    .font(.caption)
+  }
+}
+
+struct SettingsTabs: View {
+  var config: CommandCenterConfig
+
+  var body: some View {
+    TabView {
+      SettingsList(title: "Repos", rows: config.repos.map { ($0.label, $0.path) })
+        .tabItem { Label("Repos", systemImage: "folder") }
+      SettingsList(title: "Apps", rows: config.appTargets.map { ($0.label, $0.bundleID) })
+        .tabItem { Label("Apps", systemImage: "app") }
+      SettingsList(title: "Pane Templates", rows: config.paneTemplates.map { ($0.label, "\($0.slots.count) slots") })
+        .tabItem { Label("Pane Templates", systemImage: "rectangle.split.2x1") }
+      SettingsList(title: "Screen Layouts", rows: config.screenLayouts.map { ($0.label, "\($0.terminalHosts.count) hosts, \($0.appZones.count) app zones") })
+        .tabItem { Label("Screen Layouts", systemImage: "rectangle.3.group") }
+      SettingsList(title: "Actions", rows: config.actions.map { ($0.label, $0.kind.rawValue) })
+        .tabItem { Label("Actions", systemImage: "bolt") }
+    }
+  }
+}
+
+struct SettingsList: View {
+  var title: String
+  var rows: [(String, String)]
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      Text(title)
+        .font(.title3)
+        .fontWeight(.semibold)
+      List(rows, id: \.0) { row in
+        HStack {
+          Text(row.0)
+          Spacer()
+          Text(row.1)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+        }
+      }
+    }
+  }
+}
+
+struct CommandCenterLoadErrorView: View {
+  var detail: String
+  var reload: () -> Void
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      Label("Maestro could not load", systemImage: "exclamationmark.triangle.fill")
+        .font(.headline)
+        .foregroundStyle(.orange)
+      Text(detail)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+      Button(action: reload) {
+        Label("Reload", systemImage: "arrow.clockwise")
+      }
+      .buttonStyle(.bordered)
+      .controlSize(.small)
+    }
+    .padding(18)
+    .frame(maxWidth: 420, alignment: .leading)
   }
 }
