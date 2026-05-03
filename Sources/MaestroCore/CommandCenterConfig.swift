@@ -200,6 +200,7 @@ public struct CommandCenterValidator {
     let layoutIDs = Set(config.screenLayouts.map(\.id))
     let actionIDs = Set(config.actions.map(\.id))
     let sectionIDs = Set(config.sections.map(\.id))
+    var actionSlotIDsByHostID: [String: Set<String>] = [:]
 
     if config.workspace.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
       issues.append(issue("empty_workspace_id", "Workspace id must not be empty."))
@@ -283,6 +284,7 @@ public struct CommandCenterValidator {
         if !host.frame.isInsideUnitSpace {
           issues.append(issue("invalid_terminal_host_frame", "Terminal host \(host.id) frame must fit inside percentage space."))
         }
+        registerActionSlots(for: host, in: config, slotIDsByHostID: &actionSlotIDsByHostID)
       }
 
       for zone in layout.appZones {
@@ -309,9 +311,9 @@ public struct CommandCenterValidator {
         if action.argv?.isEmpty ?? true {
           issues.append(issue("empty_action_argv", "Shell action \(action.id) must define argv."))
         }
-        validatePaneActionTarget(action, hostIDs: hostIDs, issues: &issues)
+        validatePaneActionTarget(action, hostIDs: hostIDs, slotIDsByHostID: actionSlotIDsByHostID, issues: &issues)
       case .stop, .codexPrompt:
-        validatePaneActionTarget(action, hostIDs: hostIDs, issues: &issues)
+        validatePaneActionTarget(action, hostIDs: hostIDs, slotIDsByHostID: actionSlotIDsByHostID, issues: &issues)
       case .openURL:
         if action.url?.isEmpty ?? true {
           issues.append(issue("empty_action_url", "Open URL action \(action.id) must define url."))
@@ -370,6 +372,7 @@ public struct CommandCenterValidator {
   private func validatePaneActionTarget(
     _ action: CommandCenterAction,
     hostIDs: Set<String>,
+    slotIDsByHostID: [String: Set<String>],
     issues: inout [PaletteValidationIssue]
   ) {
     guard let hostID = action.hostID, let slotID = action.slotID, !slotID.isEmpty else {
@@ -378,6 +381,28 @@ public struct CommandCenterValidator {
     }
     if !hostIDs.contains(hostID) {
       issues.append(issue("unknown_action_host", "Action \(action.id) references unknown terminal host \(hostID)."))
+      return
+    }
+    if !(slotIDsByHostID[hostID]?.contains(slotID) ?? false) {
+      issues.append(issue("unknown_action_slot", "Action \(action.id) references unknown slot \(slotID) on terminal host \(hostID)."))
+    }
+  }
+
+  private func registerActionSlots(
+    for host: TerminalHost,
+    in config: CommandCenterConfig,
+    slotIDsByHostID: inout [String: Set<String>]
+  ) {
+    let profile = try? CommandCenterTerminalProfileResolver().profile(for: host, in: config)
+    let templateID = profile?.paneTemplateID ?? host.paneTemplateID
+    guard let templateID,
+          let template = config.paneTemplates.first(where: { $0.id == templateID }) else {
+      return
+    }
+
+    let slotIDs = Set(template.slots.map(\.id))
+    for hostID in Set([host.id, host.effectiveTerminalProfileID, profile?.id].compactMap { $0 }) {
+      slotIDsByHostID[hostID, default: []].formUnion(slotIDs)
     }
   }
 

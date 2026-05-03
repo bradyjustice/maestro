@@ -79,6 +79,7 @@ final class CommandCenterAppDelegate: NSObject, NSApplicationDelegate, NSWindowD
 @MainActor
 final class CommandCenterViewModel: ObservableObject {
   @Published var config: CommandCenterConfig?
+  @Published var draftConfig: CommandCenterConfig?
   @Published var loadError: String?
   @Published var selectedProfileID: String?
   @Published var selectedLayoutID: String?
@@ -87,6 +88,9 @@ final class CommandCenterViewModel: ObservableObject {
   @Published var isRunning: Set<String> = []
   @Published var lastMessage = "Idle"
   @Published var migratedFromSchemaVersion: Int?
+  @Published var hasUnsavedChanges = false
+  @Published var validationResult = PaletteValidationResult(issues: [])
+  @Published var settingsError: String?
 
   private var configFileURL: URL?
   private let defaultsKeyProfile = "MaestroCommandCenterActiveProfileID"
@@ -126,11 +130,14 @@ final class CommandCenterViewModel: ObservableObject {
       message: "Loading command center config"
     )
     do {
-      let loaded = try CommandCenterConfigLoader(environment: environment).load()
+      let loaded = try CommandCenterConfigStore(environment: environment).load()
       let configChanged = config != loaded.config
       config = loaded.config
+      draftConfig = loaded.config
       configFileURL = loaded.fileURL
       migratedFromSchemaVersion = loaded.migratedFromSchemaVersion
+      validationResult = CommandCenterConfigStore(environment: environment).validate(loaded.config)
+      hasUnsavedChanges = false
       loadError = nil
       reconcileSelection(for: loaded.config)
       if configChanged {
@@ -153,10 +160,13 @@ final class CommandCenterViewModel: ObservableObject {
       )
     } catch {
       config = nil
+      draftConfig = nil
       configFileURL = nil
       selectedProfileID = nil
       selectedLayoutID = nil
       migratedFromSchemaVersion = nil
+      validationResult = PaletteValidationResult(issues: [])
+      hasUnsavedChanges = false
       loadError = error.localizedDescription
       lastMessage = "Config error"
       diagnostics.emit(
@@ -167,6 +177,183 @@ final class CommandCenterViewModel: ObservableObject {
         context: MaestroDiagnostics.safeErrorContext(error)
       )
     }
+  }
+
+  func saveDraft() {
+    guard let draftConfig, let configFileURL else {
+      settingsError = "Configuration is not loaded."
+      lastMessage = "Configuration is not loaded."
+      return
+    }
+
+    do {
+      let result = try CommandCenterConfigStore(environment: environment).save(draftConfig, to: configFileURL)
+      config = draftConfig
+      validationResult = result.validation
+      hasUnsavedChanges = false
+      migratedFromSchemaVersion = nil
+      loadError = nil
+      reconcileSelection(for: draftConfig)
+      lastMessage = "Config saved"
+      diagnostics.emit(
+        level: .info,
+        component: "command_center.view_model",
+        name: "config.save.success",
+        message: "Saved command center config",
+        context: [
+          "workspace_id": draftConfig.workspace.id,
+          "layout_count": String(draftConfig.screenLayouts.count),
+          "action_count": String(draftConfig.actions.count)
+        ]
+      )
+    } catch {
+      validationResult = CommandCenterConfigStore(environment: environment).validate(draftConfig)
+      settingsError = error.localizedDescription
+      lastMessage = "Config save failed"
+      diagnostics.emit(
+        level: .error,
+        component: "command_center.view_model",
+        name: "config.save.failure",
+        message: "Command center config save failed",
+        context: MaestroDiagnostics.safeErrorContext(error)
+      )
+    }
+  }
+
+  func revertDraft() {
+    draftConfig = config
+    refreshDraftState()
+    lastMessage = "Draft reverted"
+  }
+
+  func updateDraft(_ update: (inout CommandCenterConfig) -> Void) {
+    guard var draft = draftConfig else {
+      return
+    }
+    update(&draft)
+    draftConfig = draft
+    refreshDraftState()
+  }
+
+  func upsertRepo(_ repo: CommandRepo, replacing originalID: String?) {
+    updateDraft { draft in
+      if let originalID,
+         let index = draft.repos.firstIndex(where: { $0.id == originalID }) {
+        draft.repos[index] = repo
+      } else if let index = draft.repos.firstIndex(where: { $0.id == repo.id }) {
+        draft.repos[index] = repo
+      } else {
+        draft.repos.append(repo)
+      }
+    }
+  }
+
+  func deleteRepo(id: String) {
+    guard !blockDeletion(target: .repo(id), label: id) else {
+      return
+    }
+    updateDraft { $0.repos.removeAll { $0.id == id } }
+  }
+
+  func upsertPaneTemplate(_ template: PaneTemplate, replacing originalID: String?) {
+    updateDraft { draft in
+      if let originalID,
+         let index = draft.paneTemplates.firstIndex(where: { $0.id == originalID }) {
+        draft.paneTemplates[index] = template
+      } else if let index = draft.paneTemplates.firstIndex(where: { $0.id == template.id }) {
+        draft.paneTemplates[index] = template
+      } else {
+        draft.paneTemplates.append(template)
+      }
+    }
+  }
+
+  func deletePaneTemplate(id: String) {
+    guard !blockDeletion(target: .paneTemplate(id), label: id) else {
+      return
+    }
+    updateDraft { $0.paneTemplates.removeAll { $0.id == id } }
+  }
+
+  func upsertTerminalProfile(_ profile: TerminalProfile, replacing originalID: String?) {
+    updateDraft { draft in
+      var profiles = draft.terminalProfiles ?? []
+      if let originalID,
+         let index = profiles.firstIndex(where: { $0.id == originalID }) {
+        profiles[index] = profile
+      } else if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
+        profiles[index] = profile
+      } else {
+        profiles.append(profile)
+      }
+      draft.terminalProfiles = profiles
+    }
+  }
+
+  func deleteTerminalProfile(id: String) {
+    guard !blockDeletion(target: .terminalProfile(id), label: id) else {
+      return
+    }
+    updateDraft { draft in
+      var profiles = draft.terminalProfiles ?? []
+      profiles.removeAll { $0.id == id }
+      draft.terminalProfiles = profiles.isEmpty ? nil : profiles
+    }
+  }
+
+  func upsertScreenLayout(_ layout: ScreenLayout, replacing originalID: String?) {
+    updateDraft { draft in
+      if let originalID,
+         let index = draft.screenLayouts.firstIndex(where: { $0.id == originalID }) {
+        draft.screenLayouts[index] = layout
+      } else if let index = draft.screenLayouts.firstIndex(where: { $0.id == layout.id }) {
+        draft.screenLayouts[index] = layout
+      } else {
+        draft.screenLayouts.append(layout)
+      }
+    }
+  }
+
+  func deleteScreenLayout(id: String) {
+    guard !blockDeletion(target: .screenLayout(id), label: id) else {
+      return
+    }
+    updateDraft { $0.screenLayouts.removeAll { $0.id == id } }
+  }
+
+  func upsertAction(_ action: CommandCenterAction, replacing originalID: String?, sectionID: String?) {
+    updateDraft { draft in
+      if let originalID,
+         let index = draft.actions.firstIndex(where: { $0.id == originalID }) {
+        draft.actions[index] = action
+      } else if let index = draft.actions.firstIndex(where: { $0.id == action.id }) {
+        draft.actions[index] = action
+      } else {
+        draft.actions.append(action)
+      }
+
+      let oldID = originalID ?? action.id
+      for index in draft.sections.indices {
+        draft.sections[index].actionIDs.removeAll { $0 == oldID || $0 == action.id }
+      }
+      if let sectionID,
+         let index = draft.sections.firstIndex(where: { $0.id == sectionID }) {
+        draft.sections[index].actionIDs.append(action.id)
+      }
+    }
+  }
+
+  func deleteAction(id: String) {
+    guard !blockDeletion(target: .action(id), label: id) else {
+      return
+    }
+    updateDraft { draft in
+      draft.actions.removeAll { $0.id == id }
+    }
+  }
+
+  func sectionID(containing actionID: String) -> String? {
+    draftConfig?.sections.first { $0.actionIDs.contains(actionID) }?.id
   }
 
   func selectProfile(id: String) {
@@ -300,6 +487,34 @@ final class CommandCenterViewModel: ObservableObject {
       UserDefaults.standard.set(selectedLayoutID, forKey: defaultsKeyLayout)
     }
   }
+
+  private func refreshDraftState() {
+    guard let draftConfig else {
+      validationResult = PaletteValidationResult(issues: [])
+      hasUnsavedChanges = false
+      return
+    }
+    validationResult = CommandCenterConfigStore(environment: environment).validate(draftConfig)
+    hasUnsavedChanges = config.map { $0 != draftConfig } ?? true
+  }
+
+  private func blockDeletion(target: CommandCenterConfigReferenceTarget, label: String) -> Bool {
+    guard let draftConfig else {
+      return true
+    }
+    let references = CommandCenterConfigReferenceInspector().references(to: target, in: draftConfig)
+    guard !references.isEmpty else {
+      return false
+    }
+    let summary = references
+      .prefix(5)
+      .map { "\($0.sourceKind) \($0.sourceID) (\($0.field))" }
+      .joined(separator: ", ")
+    let suffix = references.count > 5 ? ", ..." : ""
+    settingsError = "Cannot delete \(label). It is used by \(summary)\(suffix)."
+    lastMessage = "Delete blocked"
+    return true
+  }
 }
 
 enum CommandCenterMode: String, CaseIterable, Identifiable {
@@ -405,6 +620,7 @@ private enum CommandCenterRunOutcome: Sendable {
 
 struct CommandCenterView: View {
   @ObservedObject var model: CommandCenterViewModel
+  @State private var showReloadConfirmation = false
 
   var body: some View {
     VStack(spacing: 0) {
@@ -427,6 +643,27 @@ struct CommandCenterView: View {
     }
     .frame(minWidth: 820, minHeight: 520)
     .background(.regularMaterial)
+    .alert("Discard unsaved settings?", isPresented: $showReloadConfirmation) {
+      Button("Reload", role: .destructive) {
+        model.load()
+      }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text("Reloading will replace the current draft with palette.json from disk.")
+    }
+    .alert(
+      "Settings",
+      isPresented: Binding<Bool>(
+        get: { model.settingsError != nil },
+        set: { if !$0 { model.settingsError = nil } }
+      )
+    ) {
+      Button("OK", role: .cancel) {
+        model.settingsError = nil
+      }
+    } message: {
+      Text(model.settingsError ?? "")
+    }
   }
 
   private func leftRail(config: CommandCenterConfig, visible: CommandCenterProfileResolution) -> some View {
@@ -436,7 +673,11 @@ struct CommandCenterView: View {
           .font(.headline)
         Spacer()
         Button {
-          model.load()
+          if model.hasUnsavedChanges {
+            showReloadConfirmation = true
+          } else {
+            model.load()
+          }
         } label: {
           Image(systemName: "arrow.clockwise")
         }
@@ -522,7 +763,7 @@ struct CommandCenterView: View {
         }
         .padding(16)
       } else {
-        SettingsTabs(config: config)
+        SettingsTabs(model: model, config: model.draftConfig ?? config)
           .padding(12)
       }
     }
@@ -589,6 +830,9 @@ struct CommandCenterView: View {
       }
       if let migrated = model.migratedFromSchemaVersion {
         Label("Migrated v\(migrated)", systemImage: "arrow.triangle.2.circlepath")
+      }
+      if model.hasUnsavedChanges {
+        Label("Unsaved", systemImage: "pencil")
       }
       if model.diagnostics.isEnabled {
         Label("Debug", systemImage: "record.circle")
@@ -896,48 +1140,6 @@ struct InspectorRow: View {
         .truncationMode(.middle)
     }
     .font(.caption)
-  }
-}
-
-struct SettingsTabs: View {
-  var config: CommandCenterConfig
-
-  var body: some View {
-    TabView {
-      SettingsList(title: "Repos", rows: config.repos.map { ($0.label, $0.path) })
-        .tabItem { Label("Repos", systemImage: "folder") }
-      SettingsList(title: "Apps", rows: config.appTargets.map { ($0.label, $0.bundleID) })
-        .tabItem { Label("Apps", systemImage: "app") }
-      SettingsList(title: "Pane Templates", rows: config.paneTemplates.map { ($0.label, "\($0.slots.count) slots") })
-        .tabItem { Label("Pane Templates", systemImage: "rectangle.split.2x1") }
-      SettingsList(title: "Screen Layouts", rows: config.screenLayouts.map { ($0.label, "\($0.terminalHosts.count) hosts, \($0.appZones.count) app zones") })
-        .tabItem { Label("Screen Layouts", systemImage: "rectangle.3.group") }
-      SettingsList(title: "Actions", rows: config.actions.map { ($0.label, $0.kind.rawValue) })
-        .tabItem { Label("Actions", systemImage: "bolt") }
-    }
-  }
-}
-
-struct SettingsList: View {
-  var title: String
-  var rows: [(String, String)]
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: 10) {
-      Text(title)
-        .font(.title3)
-        .fontWeight(.semibold)
-      List(rows, id: \.0) { row in
-        HStack {
-          Text(row.0)
-          Spacer()
-          Text(row.1)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .truncationMode(.middle)
-        }
-      }
-    }
   }
 }
 

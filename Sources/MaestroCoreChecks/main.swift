@@ -8,6 +8,9 @@ struct MaestroCoreChecks {
     try checkedInCommandCenterLoadsAndValidates()
     try legacyPaletteMigratesToCommandCenter()
     try commandCenterValidationRejectsBrokenReferences()
+    try commandCenterValidationRejectsUIRelevantMistakes()
+    try commandCenterConfigStoreSavesRoundTrip()
+    try commandCenterReferenceInspectorFindsDeletionBlockers()
     try defaultLayoutFramesAndAppOverlapResolve()
     try paneTemplateGeometryResolves()
     try legacyHostsResolveAsImplicitTerminalProfiles()
@@ -157,6 +160,94 @@ struct MaestroCoreChecks {
     try expect(codes.contains("unknown_profile_layout"), "unknown profile layout rejected")
     try expect(codes.contains("unknown_profile_app_target"), "unknown profile app rejected")
     try expect(codes.contains("unknown_profile_section"), "unknown profile section rejected")
+  }
+
+  private static func commandCenterValidationRejectsUIRelevantMistakes() throws {
+    var missingLayoutProfile = try configWithTerminalProfile()
+    missingLayoutProfile.screenLayouts[0].terminalHosts[0].terminalProfileID = "missing-profile"
+    let layoutCodes = CommandCenterValidator().validate(missingLayoutProfile).issues.map(\.code)
+    try expect(layoutCodes.contains("unknown_terminal_host_profile"), "layout terminal profile reference is rejected")
+
+    var missingStartupSlot = try configWithTerminalProfile()
+    missingStartupSlot.terminalProfiles?[0].startupCommands = [
+      TerminalStartupCommand(slotID: "missing-slot", argv: ["codex"])
+    ]
+    let startupCodes = CommandCenterValidator().validate(missingStartupSlot).issues.map(\.code)
+    try expect(startupCodes.contains("unknown_terminal_profile_startup_slot"), "startup command slot reference is rejected")
+
+    var missingActionSlot = try checkedInConfig()
+    missingActionSlot.actions.append(CommandCenterAction(
+      id: "bad.slot",
+      label: "Bad Slot",
+      kind: .shellArgv,
+      hostID: "main",
+      slotID: "missing-slot",
+      argv: ["true"]
+    ))
+    let actionCodes = CommandCenterValidator().validate(missingActionSlot).issues.map(\.code)
+    try expect(actionCodes.contains("unknown_action_slot"), "action slot reference is rejected")
+  }
+
+  private static func commandCenterConfigStoreSavesRoundTrip() throws {
+    let store = CommandCenterConfigStore(environment: ["HOME": "/repo"])
+    let fileURL = temporaryConfigFile()
+    let startupCommands = [
+      TerminalStartupCommand(slotID: "top", argv: ["codex"]),
+      TerminalStartupCommand(slotID: "bottom", argv: ["env", "CLOUDFLARE_ENV=staging", "npm", "run", "db:staging"])
+    ]
+    let config = try configWithTerminalProfile(startupCommands: startupCommands)
+
+    let save = try store.save(config, to: fileURL)
+    try expectEqual(save.fileURL, fileURL, "save reports file URL")
+    try expectEqual(save.backupURL, nil, "save does not create a sidecar backup")
+    try expect(save.validation.ok, "saved config validates")
+
+    let reloaded = try store.load(fileURL: fileURL).config
+    try expectEqual(reloaded, config, "saved config round trips")
+    try expectEqual(
+      reloaded.terminalProfiles?[0].startupCommands,
+      startupCommands,
+      "terminal profile startup commands survive save/load"
+    )
+
+    let originalData = try Data(contentsOf: fileURL)
+    var invalid = config
+    invalid.screenLayouts[0].terminalHosts[0].terminalProfileID = "missing-profile"
+    do {
+      _ = try store.save(invalid, to: fileURL)
+      throw CheckFailure("invalid config save should fail")
+    } catch CommandCenterConfigError.invalidConfig {
+    }
+    let afterFailedSave = try Data(contentsOf: fileURL)
+    try expectEqual(afterFailedSave, originalData, "invalid config is rejected before writing")
+  }
+
+  private static func commandCenterReferenceInspectorFindsDeletionBlockers() throws {
+    let config = try checkedInConfig()
+    let inspector = CommandCenterConfigReferenceInspector()
+
+    try expect(
+      inspector.references(to: .repo("website"), in: config).contains { $0.sourceKind == "Pane Template" },
+      "repo references include pane templates"
+    )
+    try expect(
+      inspector.references(to: .paneTemplate("work-stack"), in: config).contains { $0.sourceKind == "Screen Layout" },
+      "pane template references include layouts"
+    )
+    try expect(
+      inspector.references(to: .screenLayout("terminal-left-third"), in: config).contains { $0.sourceKind == "Profile" },
+      "layout references include profiles"
+    )
+    try expect(
+      inspector.references(to: .action("website.dev"), in: config).contains { $0.sourceKind == "Section" },
+      "action references include sections"
+    )
+
+    let profileConfig = try configWithTerminalProfile()
+    try expect(
+      inspector.references(to: .terminalProfile("work"), in: profileConfig).contains { $0.sourceKind == "Screen Layout" },
+      "terminal profile references include layouts"
+    )
   }
 
   private static func defaultLayoutFramesAndAppOverlapResolve() throws {
@@ -659,6 +750,12 @@ struct MaestroCoreChecks {
     URL(fileURLWithPath: NSTemporaryDirectory())
       .appendingPathComponent("maestro-core-checks-\(UUID().uuidString)")
       .appendingPathComponent("command-center.jsonl")
+  }
+
+  private static func temporaryConfigFile() -> URL {
+    URL(fileURLWithPath: NSTemporaryDirectory())
+      .appendingPathComponent("maestro-core-checks-config-\(UUID().uuidString)")
+      .appendingPathComponent("palette.json")
   }
 
   private static func diagnosticsLogContents(_ fileURL: URL) throws -> String {
