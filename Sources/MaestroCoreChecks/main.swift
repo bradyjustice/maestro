@@ -6,6 +6,7 @@ import MaestroCore
 struct MaestroCoreChecks {
   static func main() throws {
     try checkedInCommandCenterLoadsAndValidates()
+    try appTargetDefaultBrowserDecodesAndValidates()
     try legacyPaletteMigratesToCommandCenter()
     try commandCenterValidationRejectsBrokenReferences()
     try commandCenterValidationRejectsUIRelevantMistakes()
@@ -16,6 +17,10 @@ struct MaestroCoreChecks {
     try legacyHostsResolveAsImplicitTerminalProfiles()
     try taggedHostPlanningIgnoresUnmanagedWindows()
     try layoutApplyReusesOwnedTerminalWindowFromState()
+    try layoutApplyMovesCreatedTerminalByReturnedWindowID()
+    try layoutApplyFailsWithoutSavingWhenCreatedTerminalIsNotTracked()
+    try layoutApplyFailsWithoutSavingWhenTerminalMoveFails()
+    try layoutApplyPropagatesAppMoveFailures()
     try duplicateTaggedTerminalWindowsAreQuarantined()
     try startupCommandsRunOnlyForIdlePanes()
     try itermProfileNameFlowsToCreatedWindow()
@@ -48,7 +53,37 @@ struct MaestroCoreChecks {
       "single-full"
     ], "starter layout order")
     try expectEqual(config.appTargets.map(\.id), ["browser", "editor"], "app target order")
+    let browser = try require(config.appTargets.first { $0.id == "browser" }, "browser app target")
+    try expect(browser.useSystemDefaultBrowser, "checked-in browser uses macOS default browser")
+    try expectEqual(browser.bundleID, nil, "checked-in browser does not hard-code a bundle id")
+    try expectEqual(browser.defaultURL, "http://localhost:3000", "checked-in browser default URL resolves default app")
     try expect(config.actions.contains { $0.id == "account.check" }, "account check action exists")
+  }
+
+  private static func appTargetDefaultBrowserDecodesAndValidates() throws {
+    let explicitJSON = """
+      {
+        "id": "editor",
+        "label": "Editor",
+        "bundleID": "com.microsoft.VSCode",
+        "role": "editor"
+      }
+      """
+    let explicit = try MaestroJSON.decoder.decode(AppTarget.self, from: Data(explicitJSON.utf8))
+    try expectEqual(explicit.bundleID, "com.microsoft.VSCode", "explicit bundle app target decodes")
+    try expect(!explicit.useSystemDefaultBrowser, "explicit bundle app target keeps default-browser flag off")
+
+    var config = try checkedInConfig()
+    try expect(CommandCenterValidator().validate(config).ok, "checked-in default browser target validates")
+
+    config.appTargets[0].role = .editor
+    var codes = CommandCenterValidator().validate(config).issues.map(\.code)
+    try expect(codes.contains("invalid_default_browser_target_role"), "default browser target must use browser role")
+
+    config = try checkedInConfig()
+    config.appTargets[0].defaultURL = nil
+    codes = CommandCenterValidator().validate(config).issues.map(\.code)
+    try expect(codes.contains("missing_default_browser_url"), "default browser target requires default URL")
   }
 
   private static func legacyPaletteMigratesToCommandCenter() throws {
@@ -347,6 +382,90 @@ struct MaestroCoreChecks {
     try expectEqual(host.ownershipDecision, .reused, "reused state window is reported")
     try expect(fakeWindows.createdHosts.isEmpty, "reapplying layout does not create a duplicate iTerm window")
     try expectEqual(fakeWindows.movedFramesByWindowID["owned-work"], host.frame, "canonical owned window is moved by iTerm window id")
+  }
+
+  private static func layoutApplyMovesCreatedTerminalByReturnedWindowID() throws {
+    let config = try configWithTerminalProfile()
+    let fakeWindows = FakeCommandCenterAutomation(createdWindowID: "returned-work-window")
+    let plan = try runtimeForChecks(
+      config: config,
+      runner: RecordingRunner(),
+      windows: fakeWindows,
+      stateStore: temporaryStateStore()
+    ).applyLayout(id: "profile-left")
+
+    let host = try require(plan.terminalHosts.first, "created profile host")
+    try expectEqual(host.window?.id, "returned-work-window", "created terminal uses returned iTerm window id")
+    try expectEqual(fakeWindows.movedFramesByWindowID["returned-work-window"], host.frame, "created terminal is moved by returned iTerm window id")
+  }
+
+  private static func layoutApplyFailsWithoutSavingWhenCreatedTerminalIsNotTracked() throws {
+    let config = try configWithTerminalProfile()
+    let fakeWindows = FakeCommandCenterAutomation(createdWindowIsTagged: false)
+    let store = temporaryStateStore()
+
+    do {
+      _ = try runtimeForChecks(
+        config: config,
+        runner: RecordingRunner(),
+        windows: fakeWindows,
+        stateStore: store
+      ).applyLayout(id: "profile-left")
+      throw CheckFailure("untracked created terminal should fail layout apply")
+    } catch CommandCenterLayoutApplyError.terminalWindowNotTracked {
+    }
+
+    let state = store.load()
+    try expectEqual(state.activeLayoutID, nil, "failed terminal tracking does not save active layout")
+    try expect(state.terminalWindows.isEmpty, "failed terminal tracking does not save clean window state")
+  }
+
+  private static func layoutApplyFailsWithoutSavingWhenTerminalMoveFails() throws {
+    let config = try configWithTerminalProfile()
+    let fakeWindows = FakeCommandCenterAutomation(taggedWindows: [
+      TerminalWindowSnapshot(id: "work-window", targetID: "work")
+    ])
+    fakeWindows.terminalMoveFailuresByWindowID["work-window"] = .boundsNotApplied
+    let store = temporaryStateStore()
+
+    do {
+      _ = try runtimeForChecks(
+        config: config,
+        runner: RecordingRunner(),
+        windows: fakeWindows,
+        stateStore: store
+      ).applyLayout(id: "profile-left")
+      throw CheckFailure("terminal move failure should fail layout apply")
+    } catch CommandCenterLayoutApplyError.terminalWindowMoveFailed {
+    }
+
+    let state = store.load()
+    try expectEqual(state.activeLayoutID, nil, "failed terminal move does not save active layout")
+    try expect(state.terminalWindows.isEmpty, "failed terminal move does not save clean window state")
+  }
+
+  private static func layoutApplyPropagatesAppMoveFailures() throws {
+    let config = try checkedInConfig()
+    let fakeWindows = FakeCommandCenterAutomation(taggedWindows: [
+      TerminalWindowSnapshot(id: "main-window", targetID: "main")
+    ])
+    fakeWindows.appMoveFailuresByTargetID["browser"] = .noFrontWindow
+    let store = temporaryStateStore()
+
+    do {
+      _ = try runtimeForChecks(
+        config: config,
+        runner: RecordingRunner(),
+        windows: fakeWindows,
+        stateStore: store
+      ).applyLayout(id: "terminal-left-third")
+      throw CheckFailure("app move failure should fail layout apply")
+    } catch CommandCenterLayoutApplyError.appWindowMoveFailed {
+    }
+
+    try expectEqual(fakeWindows.movedAppTargetIDs, ["browser", "editor"], "app move attempts are reported per target")
+    let state = store.load()
+    try expectEqual(state.activeLayoutID, nil, "failed app move does not save active layout")
   }
 
   private static func duplicateTaggedTerminalWindowsAreQuarantined() throws {
@@ -839,13 +958,31 @@ final class FakeCommandCenterAutomation: CommandCenterWindowAutomation, @uncheck
   var taggedWindows: [TerminalWindowSnapshot]
   var createdHosts: [ResolvedTerminalHost] = []
   var createdAttachCommands: [String] = []
+  var createdWindowID: String?
+  var createdTargetID: String?
+  var createdWindowIsTagged: Bool
   var focusedHostIDs: [String] = []
   var focusedWindowIDs: [String] = []
+  var focusedAppTargetIDs: [String] = []
+  var openedURLs: [(url: String, appTargetID: String?)] = []
+  var openedRepos: [(path: String, appTargetID: String)] = []
   var movedFramesByHostID: [String: LayoutRect] = [:]
   var movedFramesByWindowID: [String: LayoutRect] = [:]
+  var movedAppTargetIDs: [String] = []
+  var movedFramesByAppTargetID: [String: LayoutRect] = [:]
+  var terminalMoveFailuresByWindowID: [String: CommandCenterWindowMoveOutcome] = [:]
+  var appMoveFailuresByTargetID: [String: CommandCenterWindowMoveOutcome] = [:]
 
-  init(taggedWindows: [TerminalWindowSnapshot] = []) {
+  init(
+    taggedWindows: [TerminalWindowSnapshot] = [],
+    createdWindowID: String? = nil,
+    createdTargetID: String? = nil,
+    createdWindowIsTagged: Bool = true
+  ) {
     self.taggedWindows = taggedWindows
+    self.createdWindowID = createdWindowID
+    self.createdTargetID = createdTargetID
+    self.createdWindowIsTagged = createdWindowIsTagged
   }
 
   func activeScreen() -> LayoutScreen {
@@ -861,10 +998,17 @@ final class FakeCommandCenterAutomation: CommandCenterWindowAutomation, @uncheck
     taggedWindows
   }
 
-  func createTerminalHostWindow(for host: ResolvedTerminalHost, attachCommand: String) throws {
+  func createTerminalHostWindow(for host: ResolvedTerminalHost, attachCommand: String) throws -> TerminalWindowSnapshot {
     createdHosts.append(host)
     createdAttachCommands.append(attachCommand)
-    taggedWindows.append(TerminalWindowSnapshot(id: "created-\(host.id)", targetID: host.id))
+    let snapshot = TerminalWindowSnapshot(
+      id: createdWindowID ?? "created-\(host.id)",
+      targetID: createdWindowIsTagged ? (createdTargetID ?? host.id) : nil
+    )
+    if snapshot.targetID != nil {
+      taggedWindows.append(snapshot)
+    }
+    return snapshot
   }
 
   func focusTerminalHostWindow(hostID: String) throws {
@@ -879,15 +1023,44 @@ final class FakeCommandCenterAutomation: CommandCenterWindowAutomation, @uncheck
     movedFramesByHostID.merge(framesByHostID, uniquingKeysWith: { _, new in new })
   }
 
-  func moveTerminalHostWindowsByWindowID(_ framesByWindowID: [String: LayoutRect]) throws {
+  func moveTerminalHostWindowsByWindowID(_ framesByWindowID: [String: LayoutRect]) throws -> [CommandCenterTerminalWindowMoveReport] {
     movedFramesByWindowID.merge(framesByWindowID, uniquingKeysWith: { _, new in new })
+    return framesByWindowID
+      .sorted { $0.key < $1.key }
+      .map { windowID, frame in
+        CommandCenterTerminalWindowMoveReport(
+          windowID: windowID,
+          frame: frame,
+          outcome: terminalMoveFailuresByWindowID[windowID] ?? .moved
+        )
+      }
   }
 
-  func focusApp(bundleID: String) throws {}
+  func focusApp(_ appTarget: AppTarget) throws {
+    focusedAppTargetIDs.append(appTarget.id)
+  }
 
-  func openURL(_ url: String, bundleID: String?) throws {}
+  func openURL(_ url: String, appTarget: AppTarget?) throws {
+    openedURLs.append((url: url, appTargetID: appTarget?.id))
+  }
 
-  func openRepo(path: String, bundleID: String) throws {}
+  func openRepo(path: String, appTarget: AppTarget) throws {
+    openedRepos.append((path: path, appTargetID: appTarget.id))
+  }
 
-  func moveAppWindows(_ framesByAppTargetID: [String: LayoutRect], appTargets: [AppTarget]) throws {}
+  func moveAppWindows(_ framesByAppTargetID: [String: LayoutRect], appTargets: [AppTarget]) throws -> [CommandCenterAppWindowMoveReport] {
+    movedFramesByAppTargetID.merge(framesByAppTargetID, uniquingKeysWith: { _, new in new })
+    movedAppTargetIDs = appTargets.map(\.id)
+    return appTargets.compactMap { appTarget in
+      guard let frame = framesByAppTargetID[appTarget.id] else {
+        return nil
+      }
+      return CommandCenterAppWindowMoveReport(
+        appTargetID: appTarget.id,
+        bundleID: appTarget.bundleID,
+        frame: frame,
+        outcome: appMoveFailuresByTargetID[appTarget.id] ?? .moved
+      )
+    }
+  }
 }

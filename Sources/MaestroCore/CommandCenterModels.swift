@@ -68,22 +68,56 @@ public enum AppTargetRole: String, Codable, CaseIterable, Sendable {
 public struct AppTarget: Codable, Identifiable, Equatable, Sendable {
   public var id: String
   public var label: String
-  public var bundleID: String
+  public var bundleID: String?
+  public var useSystemDefaultBrowser: Bool
   public var role: AppTargetRole
   public var defaultURL: String?
 
   public init(
     id: String,
     label: String,
-    bundleID: String,
+    bundleID: String? = nil,
+    useSystemDefaultBrowser: Bool = false,
     role: AppTargetRole,
     defaultURL: String? = nil
   ) {
     self.id = id
     self.label = label
     self.bundleID = bundleID
+    self.useSystemDefaultBrowser = useSystemDefaultBrowser
     self.role = role
     self.defaultURL = defaultURL
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case label
+    case bundleID
+    case useSystemDefaultBrowser
+    case role
+    case defaultURL
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.id = try container.decode(String.self, forKey: .id)
+    self.label = try container.decode(String.self, forKey: .label)
+    self.bundleID = try container.decodeIfPresent(String.self, forKey: .bundleID)
+    self.useSystemDefaultBrowser = try container.decodeIfPresent(Bool.self, forKey: .useSystemDefaultBrowser) ?? false
+    self.role = try container.decode(AppTargetRole.self, forKey: .role)
+    self.defaultURL = try container.decodeIfPresent(String.self, forKey: .defaultURL)
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.container(keyedBy: CodingKeys.self)
+    try container.encode(id, forKey: .id)
+    try container.encode(label, forKey: .label)
+    try container.encodeIfPresent(bundleID, forKey: .bundleID)
+    if useSystemDefaultBrowser {
+      try container.encode(useSystemDefaultBrowser, forKey: .useSystemDefaultBrowser)
+    }
+    try container.encode(role, forKey: .role)
+    try container.encodeIfPresent(defaultURL, forKey: .defaultURL)
   }
 }
 

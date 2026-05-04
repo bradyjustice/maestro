@@ -4,15 +4,94 @@ import MaestroCore
 public protocol CommandCenterWindowAutomation: Sendable {
   func activeScreen() -> LayoutScreen
   func taggedTerminalHostWindows() throws -> [TerminalWindowSnapshot]
-  func createTerminalHostWindow(for host: ResolvedTerminalHost, attachCommand: String) throws
+  func createTerminalHostWindow(for host: ResolvedTerminalHost, attachCommand: String) throws -> TerminalWindowSnapshot
   func focusTerminalHostWindow(hostID: String) throws
   func focusTerminalHostWindow(windowID: String) throws
   func moveTerminalHostWindows(_ framesByHostID: [String: LayoutRect]) throws
-  func moveTerminalHostWindowsByWindowID(_ framesByWindowID: [String: LayoutRect]) throws
-  func focusApp(bundleID: String) throws
-  func openURL(_ url: String, bundleID: String?) throws
-  func openRepo(path: String, bundleID: String) throws
-  func moveAppWindows(_ framesByAppTargetID: [String: LayoutRect], appTargets: [AppTarget]) throws
+  func moveTerminalHostWindowsByWindowID(_ framesByWindowID: [String: LayoutRect]) throws -> [CommandCenterTerminalWindowMoveReport]
+  func focusApp(_ appTarget: AppTarget) throws
+  func openURL(_ url: String, appTarget: AppTarget?) throws
+  func openRepo(path: String, appTarget: AppTarget) throws
+  func moveAppWindows(_ framesByAppTargetID: [String: LayoutRect], appTargets: [AppTarget]) throws -> [CommandCenterAppWindowMoveReport]
+}
+
+public enum CommandCenterWindowMoveOutcome: String, Codable, Equatable, Sendable {
+  case moved
+  case applicationNotFound = "application_not_found"
+  case noFrontWindow = "no_front_window"
+  case windowNotFound = "window_not_found"
+  case moveRejected = "move_rejected"
+  case boundsNotApplied = "bounds_not_applied"
+  case missingReport = "missing_report"
+
+  public var isSuccess: Bool {
+    self == .moved
+  }
+}
+
+public struct CommandCenterTerminalWindowMoveReport: Codable, Equatable, Sendable {
+  public var windowID: String
+  public var frame: LayoutRect
+  public var outcome: CommandCenterWindowMoveOutcome
+  public var message: String?
+
+  public init(
+    windowID: String,
+    frame: LayoutRect,
+    outcome: CommandCenterWindowMoveOutcome,
+    message: String? = nil
+  ) {
+    self.windowID = windowID
+    self.frame = frame
+    self.outcome = outcome
+    self.message = message
+  }
+}
+
+public struct CommandCenterAppWindowMoveReport: Codable, Equatable, Sendable {
+  public var appTargetID: String
+  public var bundleID: String?
+  public var frame: LayoutRect
+  public var outcome: CommandCenterWindowMoveOutcome
+  public var message: String?
+
+  public init(
+    appTargetID: String,
+    bundleID: String? = nil,
+    frame: LayoutRect,
+    outcome: CommandCenterWindowMoveOutcome,
+    message: String? = nil
+  ) {
+    self.appTargetID = appTargetID
+    self.bundleID = bundleID
+    self.frame = frame
+    self.outcome = outcome
+    self.message = message
+  }
+}
+
+public enum CommandCenterLayoutApplyError: Error, LocalizedError, Equatable {
+  case terminalWindowNotTracked(layoutID: String, terminalProfileID: String, windowID: String?)
+  case terminalWindowMoveFailed(layoutID: String, reports: [CommandCenterTerminalWindowMoveReport])
+  case appWindowMoveFailed(layoutID: String, reports: [CommandCenterAppWindowMoveReport])
+
+  public var errorDescription: String? {
+    switch self {
+    case let .terminalWindowNotTracked(layoutID, terminalProfileID, windowID):
+      let suffix = windowID.map { " Created iTerm window \($0) was not tagged for that profile." } ?? ""
+      return "Failed to apply \(layoutID): terminal profile \(terminalProfileID) did not resolve to a tracked iTerm window.\(suffix)"
+    case let .terminalWindowMoveFailed(layoutID, reports):
+      let details = reports.map { report in
+        "\(report.windowID): \(report.outcome.rawValue)\(report.message.map { " (\($0))" } ?? "")"
+      }.joined(separator: ", ")
+      return "Failed to apply \(layoutID): terminal window movement failed\(details.isEmpty ? "." : " for \(details).")"
+    case let .appWindowMoveFailed(layoutID, reports):
+      let details = reports.map { report in
+        "\(report.appTargetID): \(report.outcome.rawValue)\(report.message.map { " (\($0))" } ?? "")"
+      }.joined(separator: ", ")
+      return "Failed to apply \(layoutID): app window movement failed\(details.isEmpty ? "." : " for \(details).")"
+    }
+  }
 }
 
 public protocol CommandCenterConfirmationProviding: Sendable {
@@ -222,13 +301,19 @@ public struct CommandCenterRuntime: Sendable {
 
       let missingIDs = Set(plan.missingTerminalProfileIDs)
       var createdProfileIDs = Set<String>()
+      var createdTerminalWindows: [TerminalWindowSnapshot] = []
       for host in resolvedHosts where missingIDs.contains(host.id) {
-        try windows.createTerminalHostWindow(for: host, attachCommand: attachCommand(for: host))
+        let window = try windows.createTerminalHostWindow(for: host, attachCommand: attachCommand(for: host))
+        createdTerminalWindows.append(window)
         createdProfileIDs.insert(host.id)
       }
 
       if !missingIDs.isEmpty {
-        tagged = try waitForTaggedHostWindows(hostIDs: missingIDs, existing: tagged)
+        tagged = mergeTerminalWindows(tagged, createdTerminalWindows)
+        tagged = mergeTerminalWindows(
+          try waitForTaggedHostWindows(hostIDs: missingIDs, existing: tagged),
+          createdTerminalWindows
+        )
         plan = try CommandCenterLayoutPlanner().plan(
           layout: layout,
           config: config,
@@ -239,19 +324,29 @@ public struct CommandCenterRuntime: Sendable {
         )
       }
 
+      try requireResolvedTerminalHosts(plan: plan, layoutID: layout.id, createdWindows: createdTerminalWindows)
+
       var framesByWindowID: [String: LayoutRect] = [:]
       for host in plan.terminalHosts {
         if let windowID = host.window?.id {
           framesByWindowID[windowID] = host.frame
         }
       }
-      try windows.moveTerminalHostWindowsByWindowID(framesByWindowID)
+      let terminalMoveReports = try windows.moveTerminalHostWindowsByWindowID(framesByWindowID)
+      try validateTerminalMoveReports(
+        expectedFramesByWindowID: framesByWindowID,
+        reports: terminalMoveReports,
+        layoutID: layout.id
+      )
 
       let appFrames = appFramesByTargetID(plan: plan)
-      let appTargets = plan.appZones.flatMap { zone in
-        zone.appTargetIDs.compactMap { id in config.appTargets.first { $0.id == id } }
-      }
-      try windows.moveAppWindows(appFrames, appTargets: appTargets)
+      let appTargets = appTargetsForLayoutPlan(plan)
+      let appMoveReports = try windows.moveAppWindows(appFrames, appTargets: appTargets)
+      try validateAppMoveReports(
+        expectedFramesByAppTargetID: appFrames,
+        reports: appMoveReports,
+        layoutID: layout.id
+      )
 
       try stateStore.save(CommandCenterState(
         activeLayoutID: layout.id,
@@ -272,7 +367,10 @@ public struct CommandCenterRuntime: Sendable {
           "layout_id": layout.id,
           "host_count": String(plan.terminalHosts.count),
           "app_zone_count": String(plan.appZones.count),
-          "missing_host_count": String(missingIDs.count)
+          "terminal_moved_count": String(terminalMoveReports.filter { $0.outcome.isSuccess }.count),
+          "terminal_missing_count": String(plan.missingTerminalProfileIDs.count),
+          "app_moved_count": String(appMoveReports.filter { $0.outcome.isSuccess }.count),
+          "app_missing_count": String(appFrames.count - appMoveReports.filter { $0.outcome.isSuccess }.count)
         ]
       )
       return plan
@@ -417,16 +515,16 @@ public struct CommandCenterRuntime: Sendable {
         emitActionSuccess(context: context)
         return CommandCenterRunResult(ok: true, id: id, status: .sent, message: "sent")
       case .openURL:
-        try windows.openURL(plan.url ?? "", bundleID: plan.appTarget?.bundleID)
+        try windows.openURL(plan.url ?? "", appTarget: plan.appTarget)
         context["status"] = CommandCenterRunStatus.opened.rawValue
         emitActionSuccess(context: context)
         return CommandCenterRunResult(ok: true, id: id, status: .opened, message: "opened")
       case .openRepoInEditor:
         guard let repoPath = plan.repoPath,
-              let bundleID = plan.appTarget?.bundleID else {
+              let appTarget = plan.appTarget else {
           throw CommandCenterConfigError.missingAppTarget(action.appTargetID ?? "")
         }
-        try windows.openRepo(path: repoPath, bundleID: bundleID)
+        try windows.openRepo(path: repoPath, appTarget: appTarget)
         context["status"] = CommandCenterRunStatus.opened.rawValue
         emitActionSuccess(context: context)
         return CommandCenterRunResult(ok: true, id: id, status: .opened, message: "opened")
@@ -439,8 +537,8 @@ public struct CommandCenterRuntime: Sendable {
             try windows.focusTerminalHostWindow(hostID: host.id)
           }
         }
-        if let bundleID = plan.appTarget?.bundleID {
-          try windows.focusApp(bundleID: bundleID)
+        if let appTarget = plan.appTarget {
+          try windows.focusApp(appTarget)
         }
         context["status"] = CommandCenterRunStatus.focused.rawValue
         emitActionSuccess(context: context)
@@ -572,7 +670,12 @@ public struct CommandCenterRuntime: Sendable {
     }
     if let appTarget = plan.appTarget {
       context["app_target_id"] = appTarget.id
-      context["bundle_id"] = appTarget.bundleID
+      if let bundleID = appTarget.bundleID {
+        context["bundle_id"] = bundleID
+      }
+      if appTarget.useSystemDefaultBrowser {
+        context["use_system_default_browser"] = "true"
+      }
     }
     return context
   }
@@ -632,6 +735,83 @@ public struct CommandCenterRuntime: Sendable {
           "pane_target": paneTarget
         ]
       )
+    }
+  }
+
+  private func mergeTerminalWindows(
+    _ existing: [TerminalWindowSnapshot],
+    _ additions: [TerminalWindowSnapshot]
+  ) -> [TerminalWindowSnapshot] {
+    var windowsByID: [String: TerminalWindowSnapshot] = [:]
+    var orderedIDs: [String] = []
+    for window in existing + additions {
+      if windowsByID[window.id] == nil {
+        orderedIDs.append(window.id)
+      }
+      windowsByID[window.id] = window
+    }
+    return orderedIDs.compactMap { windowsByID[$0] }
+  }
+
+  private func requireResolvedTerminalHosts(
+    plan: CommandCenterLayoutPlan,
+    layoutID: String,
+    createdWindows: [TerminalWindowSnapshot]
+  ) throws {
+    guard let missingProfileID = plan.missingTerminalProfileIDs.first else {
+      return
+    }
+    let createdWindowID = createdWindows.first { $0.targetID == missingProfileID }?.id ?? createdWindows.first?.id
+    throw CommandCenterLayoutApplyError.terminalWindowNotTracked(
+      layoutID: layoutID,
+      terminalProfileID: missingProfileID,
+      windowID: createdWindowID
+    )
+  }
+
+  private func validateTerminalMoveReports(
+    expectedFramesByWindowID: [String: LayoutRect],
+    reports: [CommandCenterTerminalWindowMoveReport],
+    layoutID: String
+  ) throws {
+    guard !expectedFramesByWindowID.isEmpty else {
+      return
+    }
+    var failures = reports.filter { !$0.outcome.isSuccess }
+    let reportedWindowIDs = Set(reports.map(\.windowID))
+    for (windowID, frame) in expectedFramesByWindowID where !reportedWindowIDs.contains(windowID) {
+      failures.append(CommandCenterTerminalWindowMoveReport(
+        windowID: windowID,
+        frame: frame,
+        outcome: .missingReport,
+        message: "move operation returned no report"
+      ))
+    }
+    if !failures.isEmpty {
+      throw CommandCenterLayoutApplyError.terminalWindowMoveFailed(layoutID: layoutID, reports: failures)
+    }
+  }
+
+  private func validateAppMoveReports(
+    expectedFramesByAppTargetID: [String: LayoutRect],
+    reports: [CommandCenterAppWindowMoveReport],
+    layoutID: String
+  ) throws {
+    guard !expectedFramesByAppTargetID.isEmpty else {
+      return
+    }
+    var failures = reports.filter { !$0.outcome.isSuccess }
+    let reportedAppTargetIDs = Set(reports.map(\.appTargetID))
+    for (appTargetID, frame) in expectedFramesByAppTargetID where !reportedAppTargetIDs.contains(appTargetID) {
+      failures.append(CommandCenterAppWindowMoveReport(
+        appTargetID: appTargetID,
+        frame: frame,
+        outcome: .missingReport,
+        message: "move operation returned no report"
+      ))
+    }
+    if !failures.isEmpty {
+      throw CommandCenterLayoutApplyError.appWindowMoveFailed(layoutID: layoutID, reports: failures)
     }
   }
 
@@ -732,6 +912,18 @@ public struct CommandCenterRuntime: Sendable {
       }
     }
     return frames
+  }
+
+  private func appTargetsForLayoutPlan(_ plan: CommandCenterLayoutPlan) -> [AppTarget] {
+    var targets: [AppTarget] = []
+    var seen = Set<String>()
+    for appTargetID in plan.appZones.flatMap(\.appTargetIDs) where !seen.contains(appTargetID) {
+      if let appTarget = config.appTargets.first(where: { $0.id == appTargetID }) {
+        targets.append(appTarget)
+        seen.insert(appTargetID)
+      }
+    }
+    return targets
   }
 
   private func attachCommand(for host: ResolvedTerminalHost) -> String {

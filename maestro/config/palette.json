@@ -97,11 +97,11 @@
   ],
   "appTargets": [
     {
-      "bundleID": "com.apple.Safari",
       "defaultURL": "http://localhost:3000",
       "id": "browser",
       "label": "Browser",
-      "role": "browser"
+      "role": "browser",
+      "useSystemDefaultBrowser": true
     },
     {
       "bundleID": "com.microsoft.VSCode",

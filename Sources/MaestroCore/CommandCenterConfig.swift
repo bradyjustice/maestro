@@ -219,8 +219,25 @@ public struct CommandCenterValidator {
       issues.append(issue("empty_repo_path", "Repo \(repo.id) must define a path."))
     }
 
-    for appTarget in config.appTargets where appTarget.bundleID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-      issues.append(issue("empty_app_bundle_id", "App target \(appTarget.id) must define a bundle ID."))
+    for appTarget in config.appTargets {
+      let bundleID = appTarget.bundleID?.trimmingCharacters(in: .whitespacesAndNewlines)
+      if appTarget.useSystemDefaultBrowser {
+        if appTarget.role != .browser {
+          issues.append(issue("invalid_default_browser_target_role", "App target \(appTarget.id) can use the system default browser only when its role is browser."))
+        }
+        if let bundleID, !bundleID.isEmpty {
+          issues.append(issue("ambiguous_app_target_browser_resolution", "App target \(appTarget.id) must not define both bundleID and useSystemDefaultBrowser."))
+        }
+        let defaultURL = appTarget.defaultURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if defaultURL?.isEmpty ?? true {
+          issues.append(issue("missing_default_browser_url", "App target \(appTarget.id) must define defaultURL when using the system default browser."))
+        } else if let defaultURL,
+                  !(URL(string: defaultURL)?.scheme?.isEmpty == false) {
+          issues.append(issue("invalid_default_browser_url", "App target \(appTarget.id) defaultURL must be a valid URL."))
+        }
+      } else if bundleID?.isEmpty ?? true {
+        issues.append(issue("empty_app_bundle_id", "App target \(appTarget.id) must define a bundle ID."))
+      }
     }
 
     for template in config.paneTemplates {

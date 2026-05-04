@@ -96,9 +96,10 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
       }
   }
 
-  public func createTerminalHostWindow(for host: ResolvedTerminalHost, attachCommand: String) throws {
+  public func createTerminalHostWindow(for host: ResolvedTerminalHost, attachCommand: String) throws -> TerminalWindowSnapshot {
     launchItermIfNeeded()
-    _ = try runAppleScript(createHostWindowScript(host: host, attachCommand: attachCommand), operation: "create_terminal_host_window")
+    let output = try runAppleScript(createHostWindowScript(host: host, attachCommand: attachCommand), operation: "create_terminal_host_window").stringValue ?? ""
+    return try parseTerminalWindowSnapshot(output, operation: "create_terminal_host_window")
   }
 
   public func focusTerminalHostWindow(hostID: String) throws {
@@ -118,33 +119,28 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
     _ = try runAppleScript(moveHostWindowsScript(framesByHostID: framesByHostID), operation: "move_terminal_host_windows")
   }
 
-  public func moveTerminalHostWindowsByWindowID(_ framesByWindowID: [String: LayoutRect]) throws {
+  public func moveTerminalHostWindowsByWindowID(_ framesByWindowID: [String: LayoutRect]) throws -> [CommandCenterTerminalWindowMoveReport] {
     guard !framesByWindowID.isEmpty else {
-      return
+      return []
     }
-    _ = try runAppleScript(moveHostWindowsByIDScript(framesByWindowID: framesByWindowID), operation: "move_terminal_host_windows_by_id")
+    let output = try runAppleScript(moveHostWindowsByIDScript(framesByWindowID: framesByWindowID), operation: "move_terminal_host_windows_by_id").stringValue ?? ""
+    return parseTerminalMoveReports(output, expectedFramesByWindowID: framesByWindowID)
   }
 
-  public func focusApp(bundleID: String) throws {
-    guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
-      emitMissingApplication(bundleID: bundleID, operation: "focus_app")
-      throw NativeMacAutomationError.applicationNotFound(bundleID)
-    }
+  public func focusApp(_ appTarget: AppTarget) throws {
+    let url = try applicationURL(for: appTarget, fallbackURL: nil, operation: "focus_app")
     let configuration = NSWorkspace.OpenConfiguration()
     configuration.activates = true
     NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, _ in }
   }
 
-  public func openURL(_ url: String, bundleID: String?) throws {
+  public func openURL(_ url: String, appTarget: AppTarget?) throws {
     guard let targetURL = URL(string: url) else {
       emitInvalidURL(url, operation: "open_url")
       throw NativeMacAutomationError.invalidURL(url)
     }
-    if let bundleID {
-      guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
-        emitMissingApplication(bundleID: bundleID, operation: "open_url")
-        throw NativeMacAutomationError.applicationNotFound(bundleID)
-      }
+    if let appTarget {
+      let appURL = try applicationURL(for: appTarget, fallbackURL: url, operation: "open_url")
       let configuration = NSWorkspace.OpenConfiguration()
       configuration.activates = true
       NSWorkspace.shared.open([targetURL], withApplicationAt: appURL, configuration: configuration) { _, _ in }
@@ -153,25 +149,173 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
     }
   }
 
-  public func openRepo(path: String, bundleID: String) throws {
-    guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
-      emitMissingApplication(bundleID: bundleID, operation: "open_repo")
-      throw NativeMacAutomationError.applicationNotFound(bundleID)
-    }
+  public func openRepo(path: String, appTarget: AppTarget) throws {
+    let appURL = try applicationURL(for: appTarget, fallbackURL: nil, operation: "open_repo")
     let configuration = NSWorkspace.OpenConfiguration()
     configuration.activates = true
     NSWorkspace.shared.open([URL(fileURLWithPath: path)], withApplicationAt: appURL, configuration: configuration) { _, _ in }
   }
 
-  public func moveAppWindows(_ framesByAppTargetID: [String: LayoutRect], appTargets: [AppTarget]) throws {
+  public func moveAppWindows(_ framesByAppTargetID: [String: LayoutRect], appTargets: [AppTarget]) throws -> [CommandCenterAppWindowMoveReport] {
     guard !framesByAppTargetID.isEmpty else {
-      return
+      return []
     }
     let targets = appTargets.filter { framesByAppTargetID[$0.id] != nil }
     guard !targets.isEmpty else {
-      return
+      return []
     }
-    _ = try runAppleScript(moveAppWindowsScript(framesByAppTargetID: framesByAppTargetID, appTargets: targets), operation: "move_app_windows")
+    var reports: [CommandCenterAppWindowMoveReport] = []
+    for appTarget in targets {
+      guard let frame = framesByAppTargetID[appTarget.id] else {
+        continue
+      }
+      let bundleID: String
+      do {
+        bundleID = try resolvedBundleID(for: appTarget, fallbackURL: appTarget.defaultURL, operation: "move_app_windows")
+      } catch let error as NativeMacAutomationError {
+        reports.append(appMoveFailureReport(appTarget: appTarget, bundleID: nil, frame: frame, error: error))
+        continue
+      }
+
+      do {
+        let output = try runAppleScript(moveAppWindowScript(bundleID: bundleID, frame: frame), operation: "move_app_window")
+          .stringValue ?? ""
+        reports.append(parseAppMoveReport(
+          output,
+          appTarget: appTarget,
+          bundleID: bundleID,
+          frame: frame
+        ))
+      } catch {
+        reports.append(CommandCenterAppWindowMoveReport(
+          appTargetID: appTarget.id,
+          bundleID: bundleID,
+          frame: frame,
+          outcome: .moveRejected,
+          message: MaestroDiagnostics.safeSummary(error.localizedDescription)
+        ))
+      }
+    }
+    return reports
+  }
+
+  private func parseTerminalWindowSnapshot(_ output: String, operation: String) throws -> TerminalWindowSnapshot {
+    let fields = output.trimmingCharacters(in: .whitespacesAndNewlines)
+      .split(separator: "\t", omittingEmptySubsequences: false)
+      .map(String.init)
+    guard fields.count >= 6,
+          let x = Double(fields[2]),
+          let y = Double(fields[3]),
+          let right = Double(fields[4]),
+          let bottom = Double(fields[5]) else {
+      throw NativeMacAutomationError.appleScriptFailed("Unexpected \(operation) result.")
+    }
+    return TerminalWindowSnapshot(
+      id: fields[0],
+      targetID: fields[1].isEmpty ? nil : fields[1],
+      frame: LayoutRect(x: x, y: y, width: right - x, height: bottom - y)
+    )
+  }
+
+  private func parseTerminalMoveReports(
+    _ output: String,
+    expectedFramesByWindowID: [String: LayoutRect]
+  ) -> [CommandCenterTerminalWindowMoveReport] {
+    output
+      .split(separator: "\n", omittingEmptySubsequences: true)
+      .compactMap { line -> CommandCenterTerminalWindowMoveReport? in
+        let fields = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+        guard fields.count >= 2,
+              let frame = expectedFramesByWindowID[fields[0]] else {
+          return nil
+        }
+        return CommandCenterTerminalWindowMoveReport(
+          windowID: fields[0],
+          frame: frame,
+          outcome: CommandCenterWindowMoveOutcome(rawValue: fields[1]) ?? .moveRejected,
+          message: fields.indices.contains(2) && !fields[2].isEmpty ? fields[2] : nil
+        )
+      }
+  }
+
+  private func parseAppMoveReport(
+    _ output: String,
+    appTarget: AppTarget,
+    bundleID: String,
+    frame: LayoutRect
+  ) -> CommandCenterAppWindowMoveReport {
+    let fields = output.trimmingCharacters(in: .whitespacesAndNewlines)
+      .split(separator: "\t", omittingEmptySubsequences: false)
+      .map(String.init)
+    guard fields.count >= 2 else {
+      return CommandCenterAppWindowMoveReport(
+        appTargetID: appTarget.id,
+        bundleID: bundleID,
+        frame: frame,
+        outcome: .missingReport,
+        message: "move operation returned no report"
+      )
+    }
+    return CommandCenterAppWindowMoveReport(
+      appTargetID: appTarget.id,
+      bundleID: bundleID,
+      frame: frame,
+      outcome: CommandCenterWindowMoveOutcome(rawValue: fields[1]) ?? .moveRejected,
+      message: fields.indices.contains(2) && !fields[2].isEmpty ? fields[2] : nil
+    )
+  }
+
+  private func appMoveFailureReport(
+    appTarget: AppTarget,
+    bundleID: String?,
+    frame: LayoutRect,
+    error: NativeMacAutomationError
+  ) -> CommandCenterAppWindowMoveReport {
+    let outcome: CommandCenterWindowMoveOutcome
+    switch error {
+    case .applicationNotFound:
+      outcome = .applicationNotFound
+    default:
+      outcome = .moveRejected
+    }
+    return CommandCenterAppWindowMoveReport(
+      appTargetID: appTarget.id,
+      bundleID: bundleID,
+      frame: frame,
+      outcome: outcome,
+      message: error.localizedDescription
+    )
+  }
+
+  private func applicationURL(for appTarget: AppTarget, fallbackURL: String?, operation: String) throws -> URL {
+    if appTarget.useSystemDefaultBrowser {
+      let urlString = fallbackURL ?? appTarget.defaultURL ?? ""
+      guard let targetURL = URL(string: urlString) else {
+        emitInvalidURL(urlString, operation: operation)
+        throw NativeMacAutomationError.invalidURL(urlString)
+      }
+      guard let appURL = NSWorkspace.shared.urlForApplication(toOpen: targetURL) else {
+        emitMissingApplication(bundleID: "system-default-browser", operation: operation)
+        throw NativeMacAutomationError.applicationNotFound("system-default-browser")
+      }
+      return appURL
+    }
+
+    guard let bundleID = appTarget.bundleID?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !bundleID.isEmpty,
+          let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+      emitMissingApplication(bundleID: appTarget.bundleID ?? appTarget.id, operation: operation)
+      throw NativeMacAutomationError.applicationNotFound(appTarget.bundleID ?? appTarget.id)
+    }
+    return appURL
+  }
+
+  private func resolvedBundleID(for appTarget: AppTarget, fallbackURL: String?, operation: String) throws -> String {
+    let appURL = try applicationURL(for: appTarget, fallbackURL: fallbackURL, operation: operation)
+    if let bundleID = Bundle(url: appURL)?.bundleIdentifier {
+      return bundleID
+    }
+    throw NativeMacAutomationError.applicationNotFound(appTarget.id)
   }
 
   private func screenUnderMouse() -> NSScreen? {
@@ -298,6 +442,9 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
         write text \(appleScriptString(attachCommand))
       end tell
       activate
+      set b to bounds of newWindow
+      set windowID to id of newWindow as text
+      return windowID & tab & \(appleScriptString(host.id)) & tab & (item 1 of b as text) & tab & (item 2 of b as text) & tab & (item 3 of b as text) & tab & (item 4 of b as text)
     end tell
     """
   }
@@ -428,45 +575,98 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
       .joined(separator: ", ")
 
     return """
+    on withinTolerance(actualValue, expectedValue)
+      set difference to actualValue - expectedValue
+      if difference < 0 then set difference to -difference
+      if difference is less than or equal to 4 then return true
+      return false
+    end withinTolerance
+
+    on boundsMatch(actualBounds, expectedBounds)
+      repeat with i from 1 to 4
+        if not my withinTolerance(item i of actualBounds, item i of expectedBounds) then return false
+      end repeat
+      return true
+    end boundsMatch
+
     set frameRecords to {\(records)}
+    set outputLines to {}
     tell application id "\(Self.iTermBundleIdentifier)"
       repeat with frameRecord in frameRecords
         set expectedWindowID to item 1 of frameRecord
+        set expectedBounds to {item 2 of frameRecord, item 3 of frameRecord, item 4 of frameRecord, item 5 of frameRecord}
+        set didFindWindow to false
         repeat with targetWindow in windows
-          try
-            if (id of targetWindow as text) is expectedWindowID then
-              set bounds of targetWindow to {item 2 of frameRecord, item 3 of frameRecord, item 4 of frameRecord, item 5 of frameRecord}
-              exit repeat
-            end if
-          end try
+          if (id of targetWindow as text) is expectedWindowID then
+            set didFindWindow to true
+            try
+              set bounds of targetWindow to expectedBounds
+              delay 0.05
+              set actualBounds to bounds of targetWindow
+              if my boundsMatch(actualBounds, expectedBounds) then
+                set end of outputLines to expectedWindowID & tab & "moved" & tab & ""
+              else
+                set end of outputLines to expectedWindowID & tab & "bounds_not_applied" & tab & ((item 1 of actualBounds as text) & "," & (item 2 of actualBounds as text) & "," & (item 3 of actualBounds as text) & "," & (item 4 of actualBounds as text))
+              end if
+            on error errorMessage
+              set end of outputLines to expectedWindowID & tab & "move_rejected" & tab & errorMessage
+            end try
+            exit repeat
+          end if
         end repeat
+        if didFindWindow is false then
+          set end of outputLines to expectedWindowID & tab & "window_not_found" & tab & ""
+        end if
       end repeat
       activate
     end tell
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to linefeed
+    set joinedOutput to outputLines as text
+    set AppleScript's text item delimiters to oldDelimiters
+    return joinedOutput
     """
   }
 
-  private func moveAppWindowsScript(framesByAppTargetID: [String: LayoutRect], appTargets: [AppTarget]) -> String {
-    let records = appTargets.compactMap { appTarget -> String? in
-      guard let frame = framesByAppTargetID[appTarget.id] else {
-        return nil
-      }
-      return "{\(appleScriptString(appTarget.bundleID)), \(Int(frame.x.rounded())), \(Int(frame.y.rounded())), \(Int(frame.maxX.rounded())), \(Int(frame.maxY.rounded()))}"
-    }.joined(separator: ", ")
-
+  private func moveAppWindowScript(bundleID: String, frame: LayoutRect) -> String {
     return """
-    set frameRecords to {\(records)}
-    repeat with frameRecord in frameRecords
-      set appBundleID to item 1 of frameRecord
+    on withinTolerance(actualValue, expectedValue)
+      set difference to actualValue - expectedValue
+      if difference < 0 then set difference to -difference
+      if difference is less than or equal to 4 then return true
+      return false
+    end withinTolerance
+
+    on boundsMatch(actualBounds, expectedBounds)
+      repeat with i from 1 to 4
+        if not my withinTolerance(item i of actualBounds, item i of expectedBounds) then return false
+      end repeat
+      return true
+    end boundsMatch
+
+    set appBundleID to \(appleScriptString(bundleID))
+    set expectedBounds to {\(Int(frame.x.rounded())), \(Int(frame.y.rounded())), \(Int(frame.maxX.rounded())), \(Int(frame.maxY.rounded()))}
+    tell application id appBundleID
+      activate
+      repeat with attempt from 1 to 25
+        if (count of windows) is greater than 0 then exit repeat
+        delay 0.1
+      end repeat
+      if (count of windows) is 0 then
+        return appBundleID & tab & "no_front_window" & tab & ""
+      end if
       try
-        tell application id appBundleID
-          activate
-          if (count of windows) is greater than 0 then
-            set bounds of front window to {item 2 of frameRecord, item 3 of frameRecord, item 4 of frameRecord, item 5 of frameRecord}
-          end if
-        end tell
+        set bounds of front window to expectedBounds
+        delay 0.05
+        set actualBounds to bounds of front window
+        if my boundsMatch(actualBounds, expectedBounds) then
+          return appBundleID & tab & "moved" & tab & ""
+        end if
+        return appBundleID & tab & "bounds_not_applied" & tab & ((item 1 of actualBounds as text) & "," & (item 2 of actualBounds as text) & "," & (item 3 of actualBounds as text) & "," & (item 4 of actualBounds as text))
+      on error errorMessage
+        return appBundleID & tab & "move_rejected" & tab & errorMessage
       end try
-    end repeat
+    end tell
     """
   }
 
