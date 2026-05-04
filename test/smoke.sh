@@ -34,7 +34,7 @@ if ! grep -q '"id" : "terminal-left-third"' "$tmp/layouts.json" || ! grep -q '"i
   exit 1
 fi
 
-if ! grep -q '"layoutID" : "terminal-left-third"' "$tmp/layout-apply.json" || ! grep -q '"sessionName" : "maestro.node.main"' "$tmp/layout-apply.json"; then
+if ! grep -q '"layoutID" : "terminal-left-third"' "$tmp/layout-apply.json" || ! grep -q '"sessionName" : "maestro_node_main"' "$tmp/layout-apply.json"; then
   printf 'Expected layout dry-run JSON to include layout and per-host session; saw:\n' >&2
   cat "$tmp/layout-apply.json" >&2
   exit 1
@@ -46,13 +46,13 @@ if ! grep -q '"id" : "account.check"' "$tmp/actions.json" || ! grep -q '"kind" :
   exit 1
 fi
 
-if ! grep -q '"actionID" : "account.check"' "$tmp/action-account-check.json" || ! grep -q '"targetPane" : "maestro.node.main:main.1"' "$tmp/action-account-check.json"; then
+if ! grep -q '"actionID" : "account.check"' "$tmp/action-account-check.json" || ! grep -q '"targetPane" : "maestro_node_main:main.1"' "$tmp/action-account-check.json"; then
   printf 'Expected action dry-run JSON to include rendered target pane; saw:\n' >&2
   cat "$tmp/action-account-check.json" >&2
   exit 1
 fi
 
-if ! grep -q '"slotID" : "top"' "$tmp/panes.json" || ! grep -q '"paneTarget" : "maestro.node.main:main.1"' "$tmp/panes.json"; then
+if ! grep -q '"slotID" : "top"' "$tmp/panes.json" || ! grep -q '"paneTarget" : "maestro_node_main:main.1"' "$tmp/panes.json"; then
   printf 'Expected pane list dry-run JSON to include configured pane slots; saw:\n' >&2
   cat "$tmp/panes.json" >&2
   exit 1
@@ -70,7 +70,7 @@ if ! grep -q '"id" : "website.dev"' "$tmp/buttons.json" || ! grep -q '"id" : "we
   exit 1
 fi
 
-if ! grep -q '"buttonID" : "website.dev"' "$tmp/website-dev.json" || ! grep -q '"displayCommand" : "npm run dev"' "$tmp/website-dev.json" || ! grep -q '"targetPane" : "maestro.node.main:main.0"' "$tmp/website-dev.json"; then
+if ! grep -q '"buttonID" : "website.dev"' "$tmp/website-dev.json" || ! grep -q '"displayCommand" : "npm run dev"' "$tmp/website-dev.json" || ! grep -q '"targetPane" : "maestro_node_main:main.0"' "$tmp/website-dev.json"; then
   printf 'Expected website dev dry-run JSON to include rendered command and target; saw:\n' >&2
   cat "$tmp/website-dev.json" >&2
   exit 1

@@ -30,6 +30,20 @@ swift run maestro-core-checks
 ./test/smoke.sh
 ```
 
+## Debug Mode
+
+Set `MAESTRO_DEBUG` to `1`, `true`, or `yes` to enable structured diagnostics on stderr when launching the UI app:
+
+```bash
+MAESTRO_DEBUG=1 swift run Maestro
+```
+
+To write the JSONL log to a specific path:
+
+```bash
+MAESTRO_DEBUG=1 MAESTRO_DEBUG_LOG=~/maestro-debug.jsonl swift run Maestro
+```
+
 ## Configuration
 
 The only repo config file is:
@@ -40,7 +54,7 @@ maestro/config/palette.json
 
 Repo paths support `~` expansion and relative paths. Terminal hosts use
 `sessionStrategy: "perHost"` and create sessions such as
-`maestro.node.main`. Shell actions store argv arrays and render shell text only
+`maestro_node_main`. Shell actions store argv arrays and render shell text only
 at the `tmux send-keys` boundary.
 
 ## Install

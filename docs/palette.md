@@ -18,7 +18,7 @@ Schema v2 turns the old button palette into a command center:
 
 Terminal profiles own the tmux session, iTerm window tag, optional iTerm
 profile name, and optional per-slot startup commands. A profile named `main`
-in the `node` workspace maps to the tmux session `maestro.node.main`, and panes
+in the `node` workspace maps to the tmux session `maestro_node_main`, and panes
 are tagged with `@maestro.repo`, `@maestro.role`, and `@maestro.slot`.
 
 Existing layout hosts that still define `repoID` and `paneTemplateID` remain

@@ -55,3 +55,4 @@ playground.xcworkspace
 .vscode/
 .idea/
 *.swp
+logs/debug.jsonl

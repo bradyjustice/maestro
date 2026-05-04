@@ -292,7 +292,7 @@ struct MaestroCoreChecks {
     let host = try require(plan.terminalHosts.first, "main terminal host")
     try expectEqual(host.hostID, "main", "legacy layout host id is preserved")
     try expectEqual(host.terminalProfileID, "main", "legacy layout host becomes implicit terminal profile")
-    try expectEqual(host.sessionName, "maestro.node.main", "implicit profile names tmux session")
+    try expectEqual(host.sessionName, "maestro_node_main", "implicit profile names tmux session")
     try expectEqual(host.ownershipDecision, .reused, "legacy tagged host is reusable")
   }
 
@@ -322,12 +322,12 @@ struct MaestroCoreChecks {
     let store = temporaryStateStore()
     try store.save(CommandCenterState(
       activeLayoutID: "profile-left",
-      hostSessions: ["work": "maestro.node.work"],
+      hostSessions: ["work": "maestro_node_work"],
       terminalWindows: [
         CommandCenterOwnedTerminalWindow(
           profileID: "work",
           iTermWindowID: "owned-work",
-          sessionName: "maestro.node.work",
+          sessionName: "maestro_node_work",
           windowName: "main",
           status: .canonical
         )
@@ -386,11 +386,11 @@ struct MaestroCoreChecks {
     let runner = RecordingRunner()
     runner.result(
       stdout: "zsh\n",
-      for: ["tmux", "display-message", "-p", "-t", "maestro.node.work:main.0", "#{pane_current_command}"]
+      for: ["tmux", "display-message", "-p", "-t", "maestro_node_work:main.0", "#{pane_current_command}"]
     )
     runner.result(
       stdout: "node\n",
-      for: ["tmux", "display-message", "-p", "-t", "maestro.node.work:main.1", "#{pane_current_command}"]
+      for: ["tmux", "display-message", "-p", "-t", "maestro_node_work:main.1", "#{pane_current_command}"]
     )
 
     _ = try runtimeForChecks(
@@ -403,10 +403,10 @@ struct MaestroCoreChecks {
     ).applyLayout(id: "profile-left")
 
     try expect(runner.calls.contains {
-      $0 == ["tmux", "send-keys", "-t", "maestro.node.work:main.0", "npm run dev", "C-m"]
+      $0 == ["tmux", "send-keys", "-t", "maestro_node_work:main.0", "npm run dev", "C-m"]
     }, "startup command is sent to shell-idle pane")
     try expect(!runner.calls.contains {
-      $0 == ["tmux", "send-keys", "-t", "maestro.node.work:main.1", "npm run dev", "C-m"]
+      $0 == ["tmux", "send-keys", "-t", "maestro_node_work:main.1", "npm run dev", "C-m"]
     }, "startup command is skipped for busy pane")
   }
 
@@ -440,15 +440,15 @@ struct MaestroCoreChecks {
       "new-session",
       "-d",
       "-s",
-      "maestro.node.main",
+      "maestro_node_main",
       "-n",
       "main",
       "-c",
       "/repo/Documents/Coding/node/node_website"
     ], "missing host creates per-host session")
     try expect(missing.commands.contains { $0.arguments.prefix(2) == ["split-window", "-t"] }, "missing host creates stack split")
-    try expect(missing.commands.contains { $0.arguments == ["select-layout", "-t", "maestro.node.main:main", "even-vertical"] }, "stack normalizes top-bottom layout")
-    try expect(missing.commands.contains { $0.arguments == ["set-option", "-p", "-t", "maestro.node.main:main.0", "@maestro.slot", "top"] }, "top slot tagged")
+    try expect(missing.commands.contains { $0.arguments == ["select-layout", "-t", "maestro_node_main:main", "even-vertical"] }, "stack normalizes top-bottom layout")
+    try expect(missing.commands.contains { $0.arguments == ["set-option", "-p", "-t", "maestro_node_main:main.0", "@maestro.slot", "top"] }, "top slot tagged")
 
     let reattach = CommandCenterTmuxPlanner().ensureHostPlan(
       host: host,
@@ -479,8 +479,8 @@ struct MaestroCoreChecks {
     let runtime = runtimeForChecks(config: config, runner: RecordingRunner())
     let plan = try runtime.actionPlan(id: "account.check", layoutID: "terminal-left-third")
     try expectEqual(plan.displayCommand, "npm run check", "action display command")
-    try expectEqual(plan.targetPane, "maestro.node.main:main.1", "action targets bottom pane")
-    try expectEqual(plan.tmuxCommand?.arguments, ["send-keys", "-t", "maestro.node.main:main.1", "npm run check", "C-m"], "action send-keys command")
+    try expectEqual(plan.targetPane, "maestro_node_main:main.1", "action targets bottom pane")
+    try expectEqual(plan.tmuxCommand?.arguments, ["send-keys", "-t", "maestro_node_main:main.1", "npm run check", "C-m"], "action send-keys command")
     let encoded = String(data: try MaestroJSON.encoder.encode(plan), encoding: .utf8) ?? ""
     try expect(encoded.contains("\"actionID\" : \"account.check\""), "action dry-run JSON includes action id")
   }
@@ -488,18 +488,18 @@ struct MaestroCoreChecks {
   private static func busyPaneBlocksWithoutConfirmationAndSendsWithConfirmation() throws {
     let config = try checkedInConfig()
     let busyRunner = RecordingRunner()
-    busyRunner.result(stdout: "node\n", for: ["tmux", "display-message", "-p", "-t", "maestro.node.main:main.0", "#{pane_current_command}"])
+    busyRunner.result(stdout: "node\n", for: ["tmux", "display-message", "-p", "-t", "maestro_node_main:main.0", "#{pane_current_command}"])
     let blocked = try runtimeForChecks(config: config, runner: busyRunner)
       .runAction(id: "website.dev", confirmation: DenyCommandCenterConfirmation())
     try expectEqual(blocked.status, .blocked, "busy pane denied status")
-    try expect(!busyRunner.calls.contains { $0 == ["tmux", "send-keys", "-t", "maestro.node.main:main.0", "npm run dev", "C-m"] }, "busy denied does not send")
+    try expect(!busyRunner.calls.contains { $0 == ["tmux", "send-keys", "-t", "maestro_node_main:main.0", "npm run dev", "C-m"] }, "busy denied does not send")
 
     let shellRunner = RecordingRunner()
-    shellRunner.result(stdout: "zsh\n", for: ["tmux", "display-message", "-p", "-t", "maestro.node.main:main.0", "#{pane_current_command}"])
+    shellRunner.result(stdout: "zsh\n", for: ["tmux", "display-message", "-p", "-t", "maestro_node_main:main.0", "#{pane_current_command}"])
     let sent = try runtimeForChecks(config: config, runner: shellRunner)
       .runAction(id: "website.dev", confirmation: DenyCommandCenterConfirmation())
     try expectEqual(sent.status, .sent, "shell pane sends without confirmation")
-    try expect(shellRunner.calls.contains { $0 == ["tmux", "send-keys", "-t", "maestro.node.main:main.0", "npm run dev", "C-m"] }, "shell pane sends command")
+    try expect(shellRunner.calls.contains { $0 == ["tmux", "send-keys", "-t", "maestro_node_main:main.0", "npm run dev", "C-m"] }, "shell pane sends command")
   }
 
   private static func paneOperationPlansSwapMoveAndRetag() throws {
@@ -511,8 +511,8 @@ struct MaestroCoreChecks {
       destination: CommandCenterPaneRef(hostID: "main", slotID: "bottom"),
       layoutID: "terminal-left-third"
     )
-    try expectEqual(swap.commands[0].arguments, ["swap-pane", "-s", "maestro.node.main:main.0", "-t", "maestro.node.main:main.1"], "swap-pane command")
-    try expect(swap.commands.contains { $0.arguments == ["set-option", "-p", "-t", "maestro.node.main:main.1", "@maestro.slot", "bottom"] }, "swap retags destination slot")
+    try expectEqual(swap.commands[0].arguments, ["swap-pane", "-s", "maestro_node_main:main.0", "-t", "maestro_node_main:main.1"], "swap-pane command")
+    try expect(swap.commands.contains { $0.arguments == ["set-option", "-p", "-t", "maestro_node_main:main.1", "@maestro.slot", "bottom"] }, "swap retags destination slot")
 
     let move = try runtime.paneOperationPlan(
       kind: .move,
@@ -530,10 +530,10 @@ struct MaestroCoreChecks {
     let directory = URL(fileURLWithPath: NSTemporaryDirectory())
       .appendingPathComponent("maestro-core-checks-\(UUID().uuidString)")
     let store = CommandCenterStateStore(stateDirectory: directory)
-    try store.save(CommandCenterState(activeLayoutID: "terminal-left-third", hostSessions: ["main": "maestro.node.main"]))
+    try store.save(CommandCenterState(activeLayoutID: "terminal-left-third", hostSessions: ["main": "maestro_node_main"]))
     let loaded = store.load()
     try expectEqual(loaded.activeLayoutID, "terminal-left-third", "state active layout round trips")
-    try expectEqual(loaded.hostSessions["main"], "maestro.node.main", "state host session round trips")
+    try expectEqual(loaded.hostSessions["main"], "maestro_node_main", "state host session round trips")
   }
 
   private static func debugOptionsParseEnvironment() throws {
@@ -613,11 +613,11 @@ struct MaestroCoreChecks {
     runner.result(
       status: 2,
       stderr: "full stderr includes TOPSECRET-STDERR and should not be logged",
-      for: ["tmux", "send-keys", "-t", "maestro.node.main:main.0", "TOPSECRET-ARGV", "C-m"]
+      for: ["tmux", "send-keys", "-t", "maestro_node_main:main.0", "TOPSECRET-ARGV", "C-m"]
     )
     do {
       try TmuxController(runner: runner, diagnostics: diagnostics)
-        .run(TmuxCommand(arguments: ["send-keys", "-t", "maestro.node.main:main.0", "TOPSECRET-ARGV", "C-m"]))
+        .run(TmuxCommand(arguments: ["send-keys", "-t", "maestro_node_main:main.0", "TOPSECRET-ARGV", "C-m"]))
       throw CheckFailure("tmux failure should throw")
     } catch is TmuxControllerError {
     }
@@ -638,7 +638,7 @@ struct MaestroCoreChecks {
       writesToStandardError: false
     )
     let successRunner = RecordingRunner()
-    successRunner.result(stdout: "zsh\n", for: ["tmux", "display-message", "-p", "-t", "maestro.node.main:main.0", "#{pane_current_command}"])
+    successRunner.result(stdout: "zsh\n", for: ["tmux", "display-message", "-p", "-t", "maestro_node_main:main.0", "#{pane_current_command}"])
     _ = try runtimeForChecks(config: config, runner: successRunner, diagnostics: successDiagnostics)
       .runAction(id: "website.dev", confirmation: DenyCommandCenterConfirmation())
     let successLog = try diagnosticsLogContents(successURL)
@@ -652,7 +652,7 @@ struct MaestroCoreChecks {
       writesToStandardError: false
     )
     let busyRunner = RecordingRunner()
-    busyRunner.result(stdout: "node\n", for: ["tmux", "display-message", "-p", "-t", "maestro.node.main:main.0", "#{pane_current_command}"])
+    busyRunner.result(stdout: "node\n", for: ["tmux", "display-message", "-p", "-t", "maestro_node_main:main.0", "#{pane_current_command}"])
     _ = try runtimeForChecks(config: config, runner: busyRunner, diagnostics: blockedDiagnostics)
       .runAction(id: "website.dev", confirmation: DenyCommandCenterConfirmation())
     let blockedLog = try diagnosticsLogContents(blockedURL)
@@ -665,11 +665,11 @@ struct MaestroCoreChecks {
       writesToStandardError: false
     )
     let failureRunner = RecordingRunner()
-    failureRunner.result(stdout: "zsh\n", for: ["tmux", "display-message", "-p", "-t", "maestro.node.main:main.0", "#{pane_current_command}"])
+    failureRunner.result(stdout: "zsh\n", for: ["tmux", "display-message", "-p", "-t", "maestro_node_main:main.0", "#{pane_current_command}"])
     failureRunner.result(
       status: 2,
       stderr: "stderr has TOPSECRET-RUNTIME",
-      for: ["tmux", "send-keys", "-t", "maestro.node.main:main.0", "npm run dev", "C-m"]
+      for: ["tmux", "send-keys", "-t", "maestro_node_main:main.0", "npm run dev", "C-m"]
     )
     do {
       _ = try runtimeForChecks(config: config, runner: failureRunner, diagnostics: failureDiagnostics)

@@ -243,7 +243,7 @@ public enum CommandCenterTmuxNaming {
   public static let windowName = "main"
 
   public static func sessionName(workspaceID: String, hostID: String) -> String {
-    "maestro.\(sanitize(workspaceID)).\(sanitize(hostID))"
+    "maestro_\(sanitize(workspaceID))_\(sanitize(hostID))"
   }
 
   public static func sanitize(_ value: String) -> String {
