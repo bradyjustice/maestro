@@ -18,9 +18,14 @@ struct MaestroCoreChecks {
     try taggedHostPlanningIgnoresUnmanagedWindows()
     try layoutApplyReusesOwnedTerminalWindowFromState()
     try layoutApplyMovesCreatedTerminalByReturnedWindowID()
+    try nativeCreateWindowFallsBackToTaggedHostAfterMalformedOutput()
+    try nativeCreateWindowRecoversSingleNewUntaggedWindowAfterMalformedOutput()
+    try nativeCreateWindowFailsWhenMalformedOutputCannotBeRecovered()
+    try nativeCreateWindowFailsWhenMalformedOutputHasMultipleNewCandidates()
     try layoutApplyFailsWithoutSavingWhenCreatedTerminalIsNotTracked()
     try layoutApplyFailsWithoutSavingWhenTerminalMoveFails()
     try layoutApplyPropagatesAppMoveFailures()
+    try layoutApplyDiagnosticsIncludeNativeErrorSummary()
     try duplicateTaggedTerminalWindowsAreQuarantined()
     try startupCommandsRunOnlyForIdlePanes()
     try itermProfileNameFlowsToCreatedWindow()
@@ -399,6 +404,189 @@ struct MaestroCoreChecks {
     try expectEqual(fakeWindows.movedFramesByWindowID["returned-work-window"], host.frame, "created terminal is moved by returned iTerm window id")
   }
 
+  private static func nativeCreateWindowFallsBackToTaggedHostAfterMalformedOutput() throws {
+    let config = try configWithTerminalProfile()
+    let diagnosticsURL = temporaryDiagnosticsFile()
+    let diagnostics = MaestroDiagnostics(
+      options: MaestroDebugOptions(enabled: true, logFileURL: diagnosticsURL),
+      writesToStandardError: false
+    )
+    let appleScript = FakeNativeAppleScriptRunner(outputsByOperation: [
+      "tagged_terminal_host_windows": [""],
+      "terminal_host_window_inventory": [
+        "",
+        nativeInventoryLine(windowID: "fallback-work-window", alternateID: "fallback-alt", sessionID: "fallback-session", hostID: "work")
+      ],
+      "create_terminal_host_window": [""],
+      "move_terminal_host_windows_by_id": ["fallback-work-window\tmoved\t"]
+    ])
+    let nativeWindows = NativeMacAutomation(
+      diagnostics: diagnostics,
+      appleScriptRunner: { source, operation in
+        try appleScript.run(source: source, operation: operation)
+      },
+      launchIterm: {},
+      terminalHostWindowRecoveryTimeout: 0
+    )
+
+    let plan = try runtimeForChecks(
+      config: config,
+      runner: RecordingRunner(),
+      diagnostics: diagnostics,
+      windows: nativeWindows,
+      stateStore: temporaryStateStore()
+    ).applyLayout(id: "profile-left")
+
+    let host = try require(plan.terminalHosts.first, "fallback-created profile host")
+    try expectEqual(host.window?.id, "fallback-work-window", "created terminal falls back to tagged iTerm window id")
+    try expectEqual(host.ownershipDecision, .created, "fallback-created window is reported as created")
+    try expect(
+      appleScript.firstSource(for: "move_terminal_host_windows_by_id")?.contains("fallback-work-window") == true,
+      "fallback-created terminal is moved by tagged iTerm window id"
+    )
+    let log = try diagnosticsLogContents(diagnosticsURL)
+    try expect(log.contains("\"name\":\"apple_script.unexpected_output\""), "unexpected AppleScript output diagnostic is emitted")
+    try expect(log.contains("\"operation\":\"create_terminal_host_window\""), "unexpected output diagnostic includes operation")
+    try expect(log.contains("\"output_bytes\":\"0\""), "unexpected output diagnostic includes output byte count")
+    try expect(log.contains("\"field_count\":\"0\""), "unexpected output diagnostic includes field count")
+  }
+
+  private static func nativeCreateWindowRecoversSingleNewUntaggedWindowAfterMalformedOutput() throws {
+    let config = try configWithTerminalProfile()
+    let diagnosticsURL = temporaryDiagnosticsFile()
+    let diagnostics = MaestroDiagnostics(
+      options: MaestroDebugOptions(enabled: true, logFileURL: diagnosticsURL),
+      writesToStandardError: false
+    )
+    let malformedOutput = String(repeating: "x", count: 35)
+    let appleScript = FakeNativeAppleScriptRunner(outputsByOperation: [
+      "tagged_terminal_host_windows": [""],
+      "terminal_host_window_inventory": [
+        "",
+        nativeInventoryLine(windowID: "recovered-work-window", alternateID: "recovered-alt", sessionID: "recovered-session")
+      ],
+      "create_terminal_host_window": [malformedOutput],
+      "retag_terminal_host_window": ["recovered-work-window\twork\t0\t0\t100\t100"],
+      "move_terminal_host_windows_by_id": ["recovered-work-window\tmoved\t"]
+    ])
+    let nativeWindows = NativeMacAutomation(
+      diagnostics: diagnostics,
+      appleScriptRunner: { source, operation in
+        try appleScript.run(source: source, operation: operation)
+      },
+      launchIterm: {},
+      terminalHostWindowRecoveryTimeout: 0
+    )
+
+    let plan = try runtimeForChecks(
+      config: config,
+      runner: RecordingRunner(),
+      diagnostics: diagnostics,
+      windows: nativeWindows,
+      stateStore: temporaryStateStore()
+    ).applyLayout(id: "profile-left")
+
+    let host = try require(plan.terminalHosts.first, "recovered profile host")
+    try expectEqual(host.window?.id, "recovered-work-window", "malformed create recovers the single new iTerm window")
+    try expectEqual(host.ownershipDecision, .created, "recovered window is reported as created")
+    try expect(
+      appleScript.firstSource(for: "retag_terminal_host_window")?.contains("recovered-work-window") == true,
+      "recovery retags the new iTerm window"
+    )
+    try expect(
+      appleScript.firstSource(for: "move_terminal_host_windows_by_id")?.contains("recovered-work-window") == true,
+      "recovered terminal is moved by returned iTerm window id"
+    )
+    let log = try diagnosticsLogContents(diagnosticsURL)
+    try expect(log.contains("\"output_bytes\":\"35\""), "unexpected output diagnostic records malformed output byte count")
+    try expect(!log.contains(malformedOutput), "diagnostics omit raw malformed create output")
+  }
+
+  private static func nativeCreateWindowFailsWhenMalformedOutputCannotBeRecovered() throws {
+    let config = try configWithTerminalProfile()
+    let diagnosticsURL = temporaryDiagnosticsFile()
+    let diagnostics = MaestroDiagnostics(
+      options: MaestroDebugOptions(enabled: true, logFileURL: diagnosticsURL),
+      writesToStandardError: false
+    )
+    let malformedOutput = "TOPSECRET-MALFORMED-CREATE"
+    let appleScript = FakeNativeAppleScriptRunner(outputsByOperation: [
+      "tagged_terminal_host_windows": [""],
+      "terminal_host_window_inventory": ["", ""],
+      "create_terminal_host_window": [malformedOutput]
+    ])
+    let nativeWindows = NativeMacAutomation(
+      diagnostics: diagnostics,
+      appleScriptRunner: { source, operation in
+        try appleScript.run(source: source, operation: operation)
+      },
+      launchIterm: {},
+      terminalHostWindowRecoveryTimeout: 0
+    )
+
+    do {
+      _ = try runtimeForChecks(
+        config: config,
+        runner: RecordingRunner(),
+        diagnostics: diagnostics,
+        windows: nativeWindows,
+        stateStore: temporaryStateStore()
+      ).applyLayout(id: "profile-left")
+      throw CheckFailure("unrecoverable malformed create output should fail layout apply")
+    } catch is NativeMacAutomationError {
+    }
+
+    try expectEqual(appleScript.invocationCount(for: "retag_terminal_host_window"), 0, "no retag is attempted without a recovery candidate")
+    let log = try diagnosticsLogContents(diagnosticsURL)
+    try expect(log.contains("\"name\":\"layout.apply.failure\""), "layout apply failure diagnostic is emitted")
+    try expect(log.contains("\"summary\":\"unexpected create_terminal_host_window result\""), "layout failure keeps the existing safe summary")
+    try expect(!log.contains(malformedOutput), "layout failure diagnostic omits raw malformed create output")
+  }
+
+  private static func nativeCreateWindowFailsWhenMalformedOutputHasMultipleNewCandidates() throws {
+    let config = try configWithTerminalProfile()
+    let diagnosticsURL = temporaryDiagnosticsFile()
+    let diagnostics = MaestroDiagnostics(
+      options: MaestroDebugOptions(enabled: true, logFileURL: diagnosticsURL),
+      writesToStandardError: false
+    )
+    let appleScript = FakeNativeAppleScriptRunner(outputsByOperation: [
+      "tagged_terminal_host_windows": [""],
+      "terminal_host_window_inventory": [
+        "",
+        [
+          nativeInventoryLine(windowID: "new-work-a", alternateID: "new-alt-a", sessionID: "new-session-a"),
+          nativeInventoryLine(windowID: "new-work-b", alternateID: "new-alt-b", sessionID: "new-session-b")
+        ].joined(separator: "\n")
+      ],
+      "create_terminal_host_window": ["malformed"]
+    ])
+    let nativeWindows = NativeMacAutomation(
+      diagnostics: diagnostics,
+      appleScriptRunner: { source, operation in
+        try appleScript.run(source: source, operation: operation)
+      },
+      launchIterm: {},
+      terminalHostWindowRecoveryTimeout: 0
+    )
+
+    do {
+      _ = try runtimeForChecks(
+        config: config,
+        runner: RecordingRunner(),
+        diagnostics: diagnostics,
+        windows: nativeWindows,
+        stateStore: temporaryStateStore()
+      ).applyLayout(id: "profile-left")
+      throw CheckFailure("multiple recovery candidates should fail layout apply")
+    } catch is NativeMacAutomationError {
+    }
+
+    try expectEqual(appleScript.invocationCount(for: "retag_terminal_host_window"), 0, "multiple candidates are not retagged")
+    let log = try diagnosticsLogContents(diagnosticsURL)
+    try expect(log.contains("\"summary\":\"unexpected create_terminal_host_window result\""), "multiple candidate failure keeps the existing safe summary")
+  }
+
   private static func layoutApplyFailsWithoutSavingWhenCreatedTerminalIsNotTracked() throws {
     let config = try configWithTerminalProfile()
     let fakeWindows = FakeCommandCenterAutomation(createdWindowIsTagged: false)
@@ -466,6 +654,37 @@ struct MaestroCoreChecks {
     try expectEqual(fakeWindows.movedAppTargetIDs, ["browser", "editor"], "app move attempts are reported per target")
     let state = store.load()
     try expectEqual(state.activeLayoutID, nil, "failed app move does not save active layout")
+  }
+
+  private static func layoutApplyDiagnosticsIncludeNativeErrorSummary() throws {
+    let config = try configWithTerminalProfile()
+    let diagnosticsURL = temporaryDiagnosticsFile()
+    let diagnostics = MaestroDiagnostics(
+      options: MaestroDebugOptions(enabled: true, logFileURL: diagnosticsURL),
+      writesToStandardError: false
+    )
+    let fakeWindows = FakeCommandCenterAutomation()
+    fakeWindows.createTerminalHostError = NativeMacAutomationError.appleScriptFailed(
+      "Not authorized to send Apple events to TOPSECRET-ITERM."
+    )
+
+    do {
+      _ = try runtimeForChecks(
+        config: config,
+        runner: RecordingRunner(),
+        diagnostics: diagnostics,
+        windows: fakeWindows,
+        stateStore: temporaryStateStore()
+      ).applyLayout(id: "profile-left")
+      throw CheckFailure("native create-window failure should fail layout apply")
+    } catch is NativeMacAutomationError {
+    }
+
+    let log = try diagnosticsLogContents(diagnosticsURL)
+    try expect(log.contains("\"name\":\"layout.apply.failure\""), "layout apply failure diagnostic is emitted")
+    try expect(log.contains("\"native_error_kind\":\"apple_script_failed\""), "layout failure includes native error kind")
+    try expect(log.contains("\"summary\":\"Apple Events permission failure\""), "layout failure includes safe native summary")
+    try expect(!log.contains("TOPSECRET-ITERM"), "layout failure diagnostic omits raw native error detail")
   }
 
   private static func duplicateTaggedTerminalWindowsAreQuarantined() throws {
@@ -881,6 +1100,29 @@ struct MaestroCoreChecks {
     String(data: try Data(contentsOf: fileURL), encoding: .utf8) ?? ""
   }
 
+  private static func nativeInventoryLine(
+    windowID: String,
+    alternateID: String = "",
+    sessionID: String = "",
+    hostID: String = "",
+    isVisible: Bool = true,
+    isMinimized: Bool = false,
+    frame: LayoutRect = LayoutRect(x: 0, y: 0, width: 100, height: 100)
+  ) -> String {
+    [
+      windowID,
+      alternateID,
+      sessionID,
+      hostID,
+      isVisible ? "true" : "false",
+      isMinimized ? "true" : "false",
+      String(frame.x),
+      String(frame.y),
+      String(frame.maxX),
+      String(frame.maxY)
+    ].joined(separator: "\t")
+  }
+
   private static func representativeScreen() -> LayoutScreen {
     LayoutScreen(
       id: "screen",
@@ -954,6 +1196,34 @@ final class RecordingRunner: CommandRunning, @unchecked Sendable {
   }
 }
 
+final class FakeNativeAppleScriptRunner: @unchecked Sendable {
+  private var outputsByOperation: [String: [String]]
+  var invocations: [(operation: String, source: String)] = []
+
+  init(outputsByOperation: [String: [String]]) {
+    self.outputsByOperation = outputsByOperation
+  }
+
+  func run(source: String, operation: String) throws -> String {
+    invocations.append((operation: operation, source: source))
+    guard var outputs = outputsByOperation[operation],
+          !outputs.isEmpty else {
+      return ""
+    }
+    let output = outputs.removeFirst()
+    outputsByOperation[operation] = outputs
+    return output
+  }
+
+  func firstSource(for operation: String) -> String? {
+    invocations.first { $0.operation == operation }?.source
+  }
+
+  func invocationCount(for operation: String) -> Int {
+    invocations.filter { $0.operation == operation }.count
+  }
+}
+
 final class FakeCommandCenterAutomation: CommandCenterWindowAutomation, @unchecked Sendable {
   var taggedWindows: [TerminalWindowSnapshot]
   var createdHosts: [ResolvedTerminalHost] = []
@@ -972,6 +1242,7 @@ final class FakeCommandCenterAutomation: CommandCenterWindowAutomation, @uncheck
   var movedFramesByAppTargetID: [String: LayoutRect] = [:]
   var terminalMoveFailuresByWindowID: [String: CommandCenterWindowMoveOutcome] = [:]
   var appMoveFailuresByTargetID: [String: CommandCenterWindowMoveOutcome] = [:]
+  var createTerminalHostError: (any Error)?
 
   init(
     taggedWindows: [TerminalWindowSnapshot] = [],
@@ -999,6 +1270,9 @@ final class FakeCommandCenterAutomation: CommandCenterWindowAutomation, @uncheck
   }
 
   func createTerminalHostWindow(for host: ResolvedTerminalHost, attachCommand: String) throws -> TerminalWindowSnapshot {
+    if let createTerminalHostError {
+      throw createTerminalHostError
+    }
     createdHosts.append(host)
     createdAttachCommands.append(attachCommand)
     let snapshot = TerminalWindowSnapshot(

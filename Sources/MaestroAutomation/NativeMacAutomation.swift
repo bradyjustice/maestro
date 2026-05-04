@@ -12,9 +12,33 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
   public static let paneVariable = "user.maestroPane"
 
   public var diagnostics: MaestroDiagnostics
+  private var appleScriptRunner: @Sendable (_ source: String, _ operation: String) throws -> String
+  private var launchIterm: @Sendable () -> Void
+  private var terminalHostWindowRecoveryTimeout: TimeInterval
 
   public init(diagnostics: MaestroDiagnostics = .disabled) {
     self.diagnostics = diagnostics
+    appleScriptRunner = { source, operation in
+      try Self.executeAppleScript(source: source, operation: operation)
+    }
+    launchIterm = {
+      Self.defaultLaunchItermIfNeeded()
+    }
+    terminalHostWindowRecoveryTimeout = 5
+  }
+
+  package init(
+    diagnostics: MaestroDiagnostics = .disabled,
+    appleScriptRunner: @escaping @Sendable (_ source: String, _ operation: String) throws -> String,
+    launchIterm: @escaping @Sendable () -> Void = {
+      Self.defaultLaunchItermIfNeeded()
+    },
+    terminalHostWindowRecoveryTimeout: TimeInterval = 5
+  ) {
+    self.diagnostics = diagnostics
+    self.appleScriptRunner = appleScriptRunner
+    self.launchIterm = launchIterm
+    self.terminalHostWindowRecoveryTimeout = terminalHostWindowRecoveryTimeout
   }
 
   public func activeScreen() -> LayoutScreen {
@@ -30,7 +54,7 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
   }
 
   public func taggedTerminalWindows() throws -> [TerminalWindowSnapshot] {
-    let output = try runAppleScript(taggedWindowsScript(), operation: "tagged_terminal_windows").stringValue ?? ""
+    let output = try runAppleScript(taggedWindowsScript(), operation: "tagged_terminal_windows")
     guard !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
       return []
     }
@@ -72,7 +96,7 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
   }
 
   public func taggedTerminalHostWindows() throws -> [TerminalWindowSnapshot] {
-    let output = try runAppleScript(taggedHostWindowsScript(), operation: "tagged_terminal_host_windows").stringValue ?? ""
+    let output = try runAppleScript(taggedHostWindowsScript(), operation: "tagged_terminal_host_windows")
     guard !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
       return []
     }
@@ -98,8 +122,21 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
 
   public func createTerminalHostWindow(for host: ResolvedTerminalHost, attachCommand: String) throws -> TerminalWindowSnapshot {
     launchItermIfNeeded()
-    let output = try runAppleScript(createHostWindowScript(host: host, attachCommand: attachCommand), operation: "create_terminal_host_window").stringValue ?? ""
-    return try parseTerminalWindowSnapshot(output, operation: "create_terminal_host_window")
+    let operation = "create_terminal_host_window"
+    let beforeInventory = try terminalHostWindowInventory()
+    let output = try runAppleScript(createHostWindowScript(host: host, attachCommand: attachCommand), operation: operation)
+    do {
+      return try parseTerminalWindowSnapshot(output, operation: operation)
+    } catch {
+      emitUnexpectedAppleScriptOutput(output, operation: operation)
+      if let window = try recoverTerminalHostWindowAfterMalformedCreate(
+        host: host,
+        beforeInventory: beforeInventory
+      ) {
+        return window
+      }
+      throw error
+    }
   }
 
   public func focusTerminalHostWindow(hostID: String) throws {
@@ -123,7 +160,7 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
     guard !framesByWindowID.isEmpty else {
       return []
     }
-    let output = try runAppleScript(moveHostWindowsByIDScript(framesByWindowID: framesByWindowID), operation: "move_terminal_host_windows_by_id").stringValue ?? ""
+    let output = try runAppleScript(moveHostWindowsByIDScript(framesByWindowID: framesByWindowID), operation: "move_terminal_host_windows_by_id")
     return parseTerminalMoveReports(output, expectedFramesByWindowID: framesByWindowID)
   }
 
@@ -179,7 +216,6 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
 
       do {
         let output = try runAppleScript(moveAppWindowScript(bundleID: bundleID, frame: frame), operation: "move_app_window")
-          .stringValue ?? ""
         reports.append(parseAppMoveReport(
           output,
           appTarget: appTarget,
@@ -215,6 +251,93 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
       targetID: fields[1].isEmpty ? nil : fields[1],
       frame: LayoutRect(x: x, y: y, width: right - x, height: bottom - y)
     )
+  }
+
+  private struct TerminalHostWindowInventoryItem: Equatable {
+    var windowID: String
+    var alternateIdentifier: String
+    var currentSessionID: String
+    var hostID: String?
+    var isVisible: Bool
+    var isMinimized: Bool
+    var frame: LayoutRect?
+
+    var identityKeys: Set<String> {
+      var keys = Set<String>()
+      if !windowID.isEmpty {
+        keys.insert("window:\(windowID)")
+      }
+      if !alternateIdentifier.isEmpty {
+        keys.insert("alternate:\(alternateIdentifier)")
+      }
+      if !currentSessionID.isEmpty {
+        keys.insert("session:\(currentSessionID)")
+      }
+      return keys
+    }
+
+    var snapshot: TerminalWindowSnapshot? {
+      guard !windowID.isEmpty else {
+        return nil
+      }
+      return TerminalWindowSnapshot(
+        id: windowID,
+        targetID: hostID,
+        frame: frame,
+        isVisible: isVisible,
+        isMinimized: isMinimized
+      )
+    }
+  }
+
+  private func terminalHostWindowInventory() throws -> [TerminalHostWindowInventoryItem] {
+    let output = try runAppleScript(
+      terminalHostWindowInventoryScript(),
+      operation: "terminal_host_window_inventory"
+    )
+    return parseTerminalHostWindowInventory(output)
+  }
+
+  private func parseTerminalHostWindowInventory(_ output: String) -> [TerminalHostWindowInventoryItem] {
+    output
+      .split(separator: "\n", omittingEmptySubsequences: true)
+      .compactMap { line in
+        let fields = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+        guard fields.count >= 10 else {
+          return nil
+        }
+
+        let frame: LayoutRect?
+        if let x = Double(fields[6]),
+           let y = Double(fields[7]),
+           let right = Double(fields[8]),
+           let bottom = Double(fields[9]) {
+          frame = LayoutRect(x: x, y: y, width: right - x, height: bottom - y)
+        } else {
+          frame = nil
+        }
+
+        return TerminalHostWindowInventoryItem(
+          windowID: fields[0],
+          alternateIdentifier: fields[1],
+          currentSessionID: fields[2],
+          hostID: fields[3].isEmpty ? nil : fields[3],
+          isVisible: parseAppleScriptBool(fields[4]) ?? true,
+          isMinimized: parseAppleScriptBool(fields[5]) ?? false,
+          frame: frame
+        )
+      }
+  }
+
+  private func parseAppleScriptBool(_ value: String) -> Bool? {
+    switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "true", "yes", "1":
+      return true
+    case "false", "no", "0":
+      return false
+    default:
+      return nil
+    }
   }
 
   private func parseTerminalMoveReports(
@@ -350,6 +473,10 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
   }
 
   private func launchItermIfNeeded() {
+    launchIterm()
+  }
+
+  private static func defaultLaunchItermIfNeeded() {
     guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.iTermBundleIdentifier) else {
       return
     }
@@ -408,6 +535,64 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
     """
   }
 
+  private func terminalHostWindowInventoryScript() -> String {
+    """
+    set outputLines to {}
+    tell application id "\(Self.iTermBundleIdentifier)"
+      repeat with targetWindow in windows
+        set windowID to ""
+        set alternateID to ""
+        set currentSessionID to ""
+        set hostID to ""
+        set visibleState to ""
+        set minimizedState to ""
+        set leftBound to ""
+        set topBound to ""
+        set rightBound to ""
+        set bottomBound to ""
+
+        try
+          set windowID to id of targetWindow as text
+        end try
+        try
+          set alternateID to alternate identifier of targetWindow as text
+        end try
+        try
+          set currentSessionID to id of current session of targetWindow as text
+        end try
+        try
+          tell current session of targetWindow
+            set hostID to variable named "\(Self.hostVariable)"
+          end tell
+        end try
+        try
+          set visibleState to visible of targetWindow as text
+        end try
+        try
+          set minimizedState to miniaturized of targetWindow as text
+        on error
+          try
+            set minimizedState to minimized of targetWindow as text
+          end try
+        end try
+        try
+          set b to bounds of targetWindow
+          set leftBound to item 1 of b as text
+          set topBound to item 2 of b as text
+          set rightBound to item 3 of b as text
+          set bottomBound to item 4 of b as text
+        end try
+        set end of outputLines to windowID & tab & alternateID & tab & currentSessionID & tab & hostID & tab & visibleState & tab & minimizedState & tab & leftBound & tab & topBound & tab & rightBound & tab & bottomBound
+      end repeat
+    end tell
+    set oldDelimiters to AppleScript's text item delimiters
+    set AppleScript's text item delimiters to linefeed
+    set joinedOutput to outputLines as text
+    set AppleScript's text item delimiters to oldDelimiters
+    return joinedOutput
+    """
+  }
+
   private func createWindowScript(target: ResolvedTerminalTarget, attachCommand: String) -> String {
     """
     tell application id "\(Self.iTermBundleIdentifier)"
@@ -444,7 +629,11 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
       activate
       set b to bounds of newWindow
       set windowID to id of newWindow as text
-      return windowID & tab & \(appleScriptString(host.id)) & tab & (item 1 of b as text) & tab & (item 2 of b as text) & tab & (item 3 of b as text) & tab & (item 4 of b as text)
+      tell current session of newWindow
+        set snapshotHostID to variable named "\(Self.hostVariable)"
+      end tell
+      set snapshotLine to windowID & tab & snapshotHostID & tab & (item 1 of b as text) & tab & (item 2 of b as text) & tab & (item 3 of b as text) & tab & (item 4 of b as text)
+      return snapshotLine
     end tell
     """
   }
@@ -670,24 +859,152 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
     """
   }
 
-  private func runAppleScript(_ source: String, operation: String) throws -> NSAppleEventDescriptor {
-    var error: NSDictionary?
-    guard let result = NSAppleScript(source: source)?.executeAndReturnError(&error) else {
-      let message = error?.description ?? "Unknown AppleScript error."
+  private func retagTerminalHostWindowScript(
+    candidate: TerminalHostWindowInventoryItem,
+    host: ResolvedTerminalHost
+  ) -> String {
+    """
+    set expectedWindowID to \(appleScriptString(candidate.windowID))
+    set expectedAlternateID to \(appleScriptString(candidate.alternateIdentifier))
+    set expectedSessionID to \(appleScriptString(candidate.currentSessionID))
+    tell application id "\(Self.iTermBundleIdentifier)"
+      repeat with targetWindow in windows
+        set didMatch to false
+        try
+          if expectedWindowID is not "" and (id of targetWindow as text) is expectedWindowID then set didMatch to true
+        end try
+        if didMatch is false then
+          try
+            if expectedAlternateID is not "" and (alternate identifier of targetWindow as text) is expectedAlternateID then set didMatch to true
+          end try
+        end if
+        if didMatch is false then
+          try
+            if expectedSessionID is not "" and (id of current session of targetWindow as text) is expectedSessionID then set didMatch to true
+          end try
+        end if
+
+        if didMatch then
+          tell current session of targetWindow
+            set variable named "\(Self.hostVariable)" to \(appleScriptString(host.id))
+            set variable named "\(Self.sessionVariable)" to \(appleScriptString(host.sessionName))
+            set variable named "\(Self.windowVariable)" to \(appleScriptString(host.windowName))
+            set snapshotHostID to variable named "\(Self.hostVariable)"
+          end tell
+          set b to bounds of targetWindow
+          set windowID to id of targetWindow as text
+          return windowID & tab & snapshotHostID & tab & (item 1 of b as text) & tab & (item 2 of b as text) & tab & (item 3 of b as text) & tab & (item 4 of b as text)
+        end if
+      end repeat
+    end tell
+    return ""
+    """
+  }
+
+  private func recoverTerminalHostWindowAfterMalformedCreate(
+    host: ResolvedTerminalHost,
+    beforeInventory: [TerminalHostWindowInventoryItem]
+  ) throws -> TerminalWindowSnapshot? {
+    let deadline = Date().addingTimeInterval(terminalHostWindowRecoveryTimeout)
+    repeat {
+      let currentInventory = try terminalHostWindowInventory()
+      if let tagged = currentInventory.first(where: { $0.hostID == host.id })?.snapshot {
+        return tagged
+      }
+
+      let candidates = newTerminalHostWindowCandidates(
+        before: beforeInventory,
+        after: currentInventory
+      )
+      if candidates.count == 1 {
+        return try retagTerminalHostWindow(candidates[0], host: host)
+      }
+      if candidates.count > 1 || Date() >= deadline {
+        return nil
+      }
+      Thread.sleep(forTimeInterval: 0.1)
+    }
+    while true
+  }
+
+  private func newTerminalHostWindowCandidates(
+    before: [TerminalHostWindowInventoryItem],
+    after: [TerminalHostWindowInventoryItem]
+  ) -> [TerminalHostWindowInventoryItem] {
+    let previousKeys = Set(before.flatMap(\.identityKeys))
+    return after.filter { item in
+      !item.identityKeys.isEmpty
+        && item.identityKeys.isDisjoint(with: previousKeys)
+        && (item.hostID ?? "").isEmpty
+    }
+  }
+
+  private func retagTerminalHostWindow(
+    _ candidate: TerminalHostWindowInventoryItem,
+    host: ResolvedTerminalHost
+  ) throws -> TerminalWindowSnapshot? {
+    let operation = "retag_terminal_host_window"
+    let output = try runAppleScript(
+      retagTerminalHostWindowScript(candidate: candidate, host: host),
+      operation: operation
+    )
+    do {
+      return try parseTerminalWindowSnapshot(output, operation: operation)
+    } catch {
+      return nil
+    }
+  }
+
+  private func runAppleScript(_ source: String, operation: String) throws -> String {
+    do {
+      return try appleScriptRunner(source, operation)
+    } catch {
+      var context: [String: String] = [
+        "operation": operation,
+        "script_bytes": String(source.utf8.count)
+      ]
+      context.merge(nativeAutomationDiagnosticContext(error), uniquingKeysWith: { current, _ in current })
       diagnostics.emit(
         level: .error,
         component: "native_mac_automation",
         name: "apple_script.failure",
         message: "AppleScript failed",
-        context: [
-          "operation": operation,
-          "summary": MaestroDiagnostics.safeSummary(message),
-          "script_bytes": String(source.utf8.count)
-        ]
+        context: context
       )
+      throw error
+    }
+  }
+
+  private static func executeAppleScript(source: String, operation _: String) throws -> String {
+    var error: NSDictionary?
+    guard let result = NSAppleScript(source: source)?.executeAndReturnError(&error) else {
+      let message = error?.description ?? "Unknown AppleScript error."
       throw NativeMacAutomationError.appleScriptFailed(message)
     }
-    return result
+    return result.stringValue ?? ""
+  }
+
+  private func emitUnexpectedAppleScriptOutput(_ output: String, operation: String) {
+    diagnostics.emit(
+      level: .warning,
+      component: "native_mac_automation",
+      name: "apple_script.unexpected_output",
+      message: "AppleScript returned unexpected output",
+      context: [
+        "operation": operation,
+        "summary": "unexpected \(operation) result",
+        "output_bytes": String(output.utf8.count),
+        "field_count": String(appleScriptFieldCount(output))
+      ]
+    )
+  }
+
+  private func appleScriptFieldCount(_ output: String) -> Int {
+    let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+      return 0
+    }
+    return trimmed.split(separator: "\t", omittingEmptySubsequences: false).count
   }
 
   private func emitMissingApplication(bundleID: String, operation: String) {
@@ -817,5 +1134,67 @@ public enum NativeMacAutomationError: Error, LocalizedError {
       return "Invalid URL: \(url)"
     }
   }
+
+  var diagnosticContext: [String: String] {
+    [
+      "native_error_kind": nativeErrorKind,
+      "summary": diagnosticSummary
+    ]
+  }
+
+  private var nativeErrorKind: String {
+    switch self {
+    case .appleScriptFailed:
+      return "apple_script_failed"
+    case .applicationNotFound:
+      return "application_not_found"
+    case .invalidURL:
+      return "invalid_url"
+    }
+  }
+
+  private var diagnosticSummary: String {
+    switch self {
+    case let .appleScriptFailed(message):
+      return Self.appleScriptFailureSummary(message)
+    case .applicationNotFound:
+      return "application not found"
+    case .invalidURL:
+      return "invalid URL"
+    }
+  }
+
+  private static func appleScriptFailureSummary(_ message: String) -> String {
+    let summary = MaestroDiagnostics.safeSummary(message)
+    let lowercased = summary.lowercased()
+    if lowercased.contains("not authorized")
+      || lowercased.contains("not permitted")
+      || lowercased.contains("automation")
+      || lowercased.contains("privacy") {
+      return "Apple Events permission failure"
+    }
+    if lowercased.contains("application isn't running")
+      || lowercased.contains("application is not running")
+      || lowercased.contains("can't get application") {
+      return "AppleScript application unavailable"
+    }
+    if summary.hasPrefix("Unexpected ") {
+      var generated = summary
+      if generated.hasSuffix(".") {
+        generated.removeLast()
+      }
+      return String(generated.prefix(1)).lowercased() + String(generated.dropFirst())
+    }
+    return "AppleScript operation failed"
+  }
+}
+
+func nativeAutomationDiagnosticContext(_ error: any Error) -> [String: String] {
+  guard let nativeError = error as? NativeMacAutomationError else {
+    return MaestroDiagnostics.safeErrorContext(error)
+  }
+  var context = MaestroDiagnostics.safeErrorContext(error)
+  context.merge(nativeError.diagnosticContext, uniquingKeysWith: { _, new in new })
+  return context
 }
 #endif

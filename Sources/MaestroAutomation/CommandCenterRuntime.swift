@@ -375,7 +375,7 @@ public struct CommandCenterRuntime: Sendable {
       )
       return plan
     } catch {
-      var context = MaestroDiagnostics.safeErrorContext(error)
+      var context = nativeAutomationDiagnosticContext(error)
       context["requested_layout_id"] = id ?? ""
       diagnostics.emit(
         level: .error,

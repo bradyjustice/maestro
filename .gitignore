@@ -56,3 +56,4 @@ playground.xcworkspace
 .idea/
 *.swp
 logs/debug.jsonl
+logs/maestro-debug.jsonl
