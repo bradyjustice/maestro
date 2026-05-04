@@ -270,7 +270,10 @@ public struct CommandCenterRuntime: Sendable {
     )
   }
 
-  public func applyLayout(id: String? = nil) throws -> CommandCenterLayoutPlan {
+  public func applyLayout(
+    id: String? = nil,
+    tolerateMissingAppWindows: Bool = false
+  ) throws -> CommandCenterLayoutPlan {
     diagnostics.emit(
       level: .info,
       component: "command_center.runtime",
@@ -345,7 +348,8 @@ public struct CommandCenterRuntime: Sendable {
       try validateAppMoveReports(
         expectedFramesByAppTargetID: appFrames,
         reports: appMoveReports,
-        layoutID: layout.id
+        layoutID: layout.id,
+        tolerateMissingAppWindows: tolerateMissingAppWindows
       )
 
       try stateStore.save(CommandCenterState(
@@ -795,12 +799,15 @@ public struct CommandCenterRuntime: Sendable {
   private func validateAppMoveReports(
     expectedFramesByAppTargetID: [String: LayoutRect],
     reports: [CommandCenterAppWindowMoveReport],
-    layoutID: String
+    layoutID: String,
+    tolerateMissingAppWindows: Bool = false
   ) throws {
     guard !expectedFramesByAppTargetID.isEmpty else {
       return
     }
-    var failures = reports.filter { !$0.outcome.isSuccess }
+    var failures = reports.filter {
+      !$0.outcome.isSuccess && !(tolerateMissingAppWindows && isMissingAppWindowOutcome($0.outcome))
+    }
     let reportedAppTargetIDs = Set(reports.map(\.appTargetID))
     for (appTargetID, frame) in expectedFramesByAppTargetID where !reportedAppTargetIDs.contains(appTargetID) {
       failures.append(CommandCenterAppWindowMoveReport(
@@ -812,6 +819,15 @@ public struct CommandCenterRuntime: Sendable {
     }
     if !failures.isEmpty {
       throw CommandCenterLayoutApplyError.appWindowMoveFailed(layoutID: layoutID, reports: failures)
+    }
+  }
+
+  private func isMissingAppWindowOutcome(_ outcome: CommandCenterWindowMoveOutcome) -> Bool {
+    switch outcome {
+    case .applicationNotFound, .noFrontWindow, .windowNotFound:
+      return true
+    case .moved, .moveRejected, .boundsNotApplied, .missingReport:
+      return false
     }
   }
 

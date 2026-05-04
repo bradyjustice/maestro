@@ -1,6 +1,20 @@
 import Foundation
 
 public enum MaestroPaths {
+  public static func defaultWorkspaceConfigFile(
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    currentDirectory: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
+    executableURL: URL? = Bundle.main.executableURL,
+    fileManager: FileManager = .default
+  ) -> URL {
+    defaultConfigFile(
+      environment: environment,
+      currentDirectory: currentDirectory,
+      executableURL: executableURL,
+      fileManager: fileManager
+    )
+  }
+
   public static func defaultConfigFile(
     environment: [String: String] = ProcessInfo.processInfo.environment,
     currentDirectory: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
@@ -13,19 +27,19 @@ public enum MaestroPaths {
 
     if let explicitDirectory = nonEmpty(environment["MAESTRO_CONFIG_DIR"]) {
       return URL(fileURLWithPath: expandHome(explicitDirectory, environment: environment))
-        .appendingPathComponent("palette.json")
+        .appendingPathComponent("workspace.json")
     }
 
-    if let found = findUp(from: currentDirectory, relativePath: "maestro/config/palette.json", fileManager: fileManager) {
+    if let found = findUp(from: currentDirectory, relativePath: "maestro/config/workspace.json", fileManager: fileManager) {
       return found
     }
 
     if let executableURL,
-       let found = findUp(from: executableURL.deletingLastPathComponent(), relativePath: "maestro/config/palette.json", fileManager: fileManager) {
+       let found = findUp(from: executableURL.deletingLastPathComponent(), relativePath: "maestro/config/workspace.json", fileManager: fileManager) {
       return found
     }
 
-    return currentDirectory.appendingPathComponent("maestro/config/palette.json")
+    return currentDirectory.appendingPathComponent("maestro/config/workspace.json")
   }
 
   private static func findUp(from start: URL, relativePath: String, fileManager: FileManager) -> URL? {

@@ -1,0 +1,17 @@
+{
+  "browser": {
+    "defaultURL": "http://localhost",
+    "label": "Browser",
+    "useSystemDefaultBrowser": true
+  },
+  "schemaVersion": 3,
+  "vsCode": {
+    "bundleID": "com.microsoft.VSCode",
+    "label": "VS Code"
+  },
+  "workspace": {
+    "id": "maestro",
+    "label": "Maestro",
+    "path": "../.."
+  }
+}

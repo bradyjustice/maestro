@@ -835,12 +835,13 @@ public struct NativeMacAutomation: PaletteWindowAutomation, CommandCenterWindowA
 
     set appBundleID to \(appleScriptString(bundleID))
     set expectedBounds to {\(Int(frame.x.rounded())), \(Int(frame.y.rounded())), \(Int(frame.maxX.rounded())), \(Int(frame.maxY.rounded()))}
+    tell application "System Events"
+      set matchingProcesses to application processes whose bundle identifier is appBundleID
+      if (count of matchingProcesses) is 0 then
+        return appBundleID & tab & "application_not_found" & tab & "not running"
+      end if
+    end tell
     tell application id appBundleID
-      activate
-      repeat with attempt from 1 to 25
-        if (count of windows) is greater than 0 then exit repeat
-        delay 0.1
-      end repeat
       if (count of windows) is 0 then
         return appBundleID & tab & "no_front_window" & tab & ""
       end if

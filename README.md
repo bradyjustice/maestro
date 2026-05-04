@@ -1,25 +1,15 @@
 # Maestro
 
-Maestro is a native macOS command center for local workspace coordination. It
-owns Maestro-tagged iTerm windows, per-host tmux sessions, app focus zones, and
-curated safe commands.
-
-The current config schema is v2. It models repos, app targets, screen layouts,
-terminal hosts, pane templates, pane slots, and actions. Legacy v1
-`palette.json` files remain readable through a migration adapter, and
-`maestro button ...` stays available as an alias for command and stop actions.
+Maestro is a local macOS workspace arranger. The current sliver is intentionally
+small: one Maestro repo workspace, one Maestro-tagged iTerm window on the left
+third, and Browser plus VS Code sharing the right two-thirds.
 
 ## Commands
 
 ```bash
 ./bin/maestro config validate --json
-./bin/maestro layout list --json
-./bin/maestro layout apply terminal-left-third --dry-run --json
-./bin/maestro action list --json
-./bin/maestro action run account.check --dry-run --json
-./bin/maestro pane list --layout terminal-left-third --dry-run --json
-./bin/maestro button list --json
-./bin/maestro button run website.dev --dry-run --json
+./bin/maestro arrange --dry-run --json
+./bin/maestro arrange
 ```
 
 Build and checks:
@@ -46,16 +36,17 @@ MAESTRO_DEBUG=1 MAESTRO_DEBUG_LOG=~/maestro-debug.jsonl swift run Maestro
 
 ## Configuration
 
-The only repo config file is:
+The repo config file is:
 
 ```text
-maestro/config/palette.json
+maestro/config/workspace.json
 ```
 
-Repo paths support `~` expansion and relative paths. Terminal hosts use
-`sessionStrategy: "perHost"` and create sessions such as
-`maestro_node_main`. Shell actions store argv arrays and render shell text only
-at the `tmux send-keys` boundary.
+Schema v3 contains the workspace `id`, `label`, and `path`, plus concrete app
+settings for Browser and VS Code. `maestro arrange` does not open URLs, open
+repos, or run dev commands. It creates or reuses the tagged iTerm window,
+attaches it to `maestro_maestro_main`, and only moves Browser or VS Code when
+those apps already have windows.
 
 ## Install
 

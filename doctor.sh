@@ -36,9 +36,9 @@ for dep in bash swift tmux osascript; do
 done
 
 if "$repo_root/bin/maestro" config validate --json >/dev/null; then
-  pass "palette config"
+  pass "workspace config"
 else
-  fail "palette config validation"
+  fail "workspace config validation"
 fi
 
 if [[ -d /Applications/iTerm.app || -d /Applications/iTerm2.app ]]; then
@@ -53,4 +53,3 @@ if (( failures > 0 )); then
 fi
 
 printf '\nAll checks passed.\n'
-
