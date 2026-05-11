@@ -5,22 +5,6 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bin_dir="${LOCAL_TOOLS_BIN_DIR:-$HOME/.local/bin}"
 dry_run=0
 
-managed_commands=(
-  maestro
-  agent-lib
-  agent-start
-  agent-status
-  agent-review
-  agent-mark
-  agent-clean
-  work
-  iterm-quad-laptop
-  iterm-quad-left
-  iterm-reset-left
-  iterm-stack-laptop
-  iterm-stack-left
-)
-
 usage() {
   cat <<'USAGE'
 Usage: ./uninstall.sh [options]
@@ -65,14 +49,13 @@ run() {
   fi
 }
 
-for command_name in "${managed_commands[@]}"; do
-  link_path="$bin_dir/$command_name"
-  source_path="$repo_root/bin/$command_name"
+link_path="$bin_dir/maestro"
+source_path="$repo_root/bin/maestro"
 
-  if [[ -L "$link_path" && "$(readlink "$link_path")" = "$source_path" ]]; then
-    run rm "$link_path"
-    printf 'Removed: %s\n' "$link_path"
-  elif [[ -e "$link_path" || -L "$link_path" ]]; then
-    printf 'Skipping unmanaged path: %s\n' "$link_path"
-  fi
-done
+if [[ -L "$link_path" && "$(readlink "$link_path")" = "$source_path" ]]; then
+  run rm "$link_path"
+  printf 'Removed: %s\n' "$link_path"
+elif [[ -e "$link_path" || -L "$link_path" ]]; then
+  printf 'Skipping unmanaged path: %s\n' "$link_path"
+fi
+
